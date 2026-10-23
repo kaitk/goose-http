@@ -968,7 +968,9 @@ header and trailer and the 24-byte `Content-Encoding: gzip` line outweigh what i
 saves. Measured on prefixes of HttpArena's `/json/50` body and its `dataset.json`, with
 goose-compress `v0.1.4`: at 256 bytes, compressing saves 36 and 56 bytes; at 512, 216
 and 245; at 128, it costs 23 and 11. At 1,024, an 888-byte JSON answer such as
-json-comp's `/json/5` went out raw where Aegon's gzip sends 385 bytes. nginx's default
+`/json/5?m=7` went out raw where Aegon's gzip sends 385 bytes. HttpArena's json-comp
+no longer asks for it: its harness at `3717e25` sends `/json/25`, `/json/40`, and
+`/json/50` only, so the change leaves that benchmark's bytes as they were. nginx's default
 `gzip_min_length` is 20 bytes, and Aegon's json-comp entry compresses from 64.
 
 The trade-off: a body of 256 to 1,023 bytes now costs a compression call, a few µs at
