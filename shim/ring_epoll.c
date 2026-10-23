@@ -184,7 +184,7 @@ static void rp_send_free(struct rp *u, struct rp_send *s) {
     s->file = -1;
     if (s->cap <= RP_SMALL) {
         int k = 0;
-        while ((RP_MIN << k) < s->cap) k++;
+        while (((uint32_t)RP_MIN << k) < s->cap) k++;
         s->next = u->small[k];
         u->small[k] = s;
     } else if (u->kept + s->cap <= RP_KEEP) {

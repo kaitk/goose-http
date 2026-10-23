@@ -15,6 +15,8 @@ static void *test_malloc(size_t n) {
     if (fail_alloc) { fail_alloc = 0; return NULL; }
     return malloc(n);
 }
+/* macOS's fortified <string.h> defines memcpy as a macro. */
+#undef memcpy
 #define memcpy count_copy
 #define malloc test_malloc
 #include "../../shim/ring_epoll.c"
