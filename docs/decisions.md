@@ -109,10 +109,11 @@ nothing queued on its socket first tries synchronous `send(2)`; only unsent byte
 need a retained copy. Smaller sends stay asynchronous because a syscall per response
 cost small REST responses throughput.
 
-The readiness-based emulation (2026-10-22, task 064) tries sends of at least
-16 KiB when the socket is writable and has no queued send. Small sends remain
+The readiness-based emulation (2026-10-22, task 065) tries sends of at least
+16 KB when the socket is writable and has no queued send. Small sends remain
 queued: immediate output wakes clients while the loop is still processing a
-pipelined receive, and the all-size experiment lost plaintext throughput.
+pipelined receive, and the all-size experiment lost plaintext throughput
+([measurements](results.md#2026-10-22-the-emulated-ring-sends-large-writes-without-a-copy)).
 The ring owns the unsent tail before returning and reports even a complete
 inline send from `ur_wait`. Native io_uring retains the 64 KB threshold.
 

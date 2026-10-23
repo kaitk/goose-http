@@ -17,6 +17,57 @@ WSL2 loopback runs through a VM; its kernel cost differs from bare metal. Runs t
 2026-10-12 use kernel 6.18.40.1-microsoft-standard-WSL2. The 2026-10-14 runs use
 6.18.54.1-microsoft-standard-WSL2. Each run's `env.txt` records the environment.
 
+## 2026-10-22: the emulated ring sends large writes without a copy
+
+Task 065, measured on an AMD Ryzen 9 9950X3D: x86-64 Docker on WSL2, kernel
+5.15.167.4, glibc 2.39, where io_uring setup returns `EINVAL`, so `LOOP=uring` runs the
+emulated ring over epoll. Goose `v2026.3` and Clang 18.1.3 built the baseline `df12a627`
+and the PR's commits `10123bb` (every size skips the copy) and `a123284` (16 KB and
+up). Timing began after three quiet five-second host samples. Neither native io_uring,
+macOS, nor Windows was measured.
+
+**Plaintext.** Each sample is `bench/count.sh` with 10 M `/plaintext` requests, all
+2xx: one worker on CPU 0, h2load with 8 threads on CPUs 4-15, 256 connections, 16 in
+flight each. Every size ran three pairs; 16 KB ran three in each order
+(`LOOP=uring RUNS=3 N=10000000 sh bench/count.sh goose-send-before goose-send-after`,
+then the reverse with `PORT=29291`). Medians (ranges), per request:
+
+| Build | User instructions | User cycles | req/s |
+|---|---:|---:|---:|
+| Before | 2,047.6 (2,047.5-2,047.6) | 436.7 (432.3-437.7) | 2,212,226 (2,129,599-2,515,325) |
+| Every size | 2,040.1 (2,040.1-2,040.2) | 560.5 (549.7-570.1) | 1,649,091 (1,574,386-1,771,929) |
+| Before | 2,047.6 (2,047.5-2,047.6) | 435.25 (431.9-436.7) | 2,475,665 (2,269,966-2,523,131) |
+| 16 KB | 2,048.0 (2,047.9-2,048.0) | 436.5 (434.0-438.9) | 2,265,172 (2,126,040-2,339,571) |
+
+Every size loses 25.5% with ranges apart, so small sends stay queued. 16 KB adds 0.02%
+instructions and 0.29% cycles, yet its median falls 8.5%; the ranges overlap, and user
+counters, which exclude the kernel, don't explain the gap.
+
+**Application.** An unpublished Campfire application, which this repository can't
+rebuild: four workers on CPUs 0,2,4,6 with 2 GiB, fresh fixture storage, and the shared
+[Campfire verifier](https://github.com/basecamp/once-campfire-verification/tree/ec02debb3e44f40b8778a6a42db3c4515b2f9eaf);
+the client on CPUs 8,10,12,14 runs `http --gzip 1 --conc 16 --duration 30 --requests
+3000000` against `room_show`, a cached gzip response of about 21 KB, with no WebSocket
+subscribers. After a 2 s warm-up, five pairs alternate order, 3 M validated reads per
+sample under `perf stat -x, -e instructions:u,cycles:u,task-clock -p 1 -- sleep 25`;
+every response passed. The every-size pairs ran earlier, on Goose `d9573d8`. Medians:
+
+| Per response | Before | 16 KB | Change | Before | Every size | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| User instructions | 7,825.7 | 7,808.5 | -0.2% | 7,826 | 7,785 | -0.5% |
+| User cycles | 9,218.6 | 8,351.7 | -9.4% | 8,665 | 7,736 | -10.7% |
+| Server CPU µs | 8.454 | 8.115 | -4.0% | 7.95 | 7.54 | -5.2% |
+| Responses/s | 213,817 | 230,004 | +7.6% | 228,703 | 250,237 | +9.4% |
+
+At 16 KB, cycles fall in every pair (11.2%, 5.0%, 16.5%, 14.1%, 1.4%), CPU time in
+three of five, and throughput in four; one pair loses 2.8%. Rates span 205,543-236,734
+before and 220,747-251,441 after. Every size's pairs change throughput by +10.0%, +7.0%,
++3.6%, -2.6%, and +17.0% (205,714-253,901 before, 213,136-267,629 after), and cycles by
+-3.4% to -17.2%. A shorter three-pair probe (600 K reads, a 10 s perf window) lost 2.5%
+throughput and spent 4.1% more CPU time while cycles fell 3.0%. Task-clock includes
+idle time around the batch, and the client ran near its four-core limit, so the rates
+aren't capacity. The Rust and Jai Campfire servers weren't rerun beside the 16 KB build.
+
 ## 2026-10-22: v0.5.4, Goose builds only
 
 Plod's (then goose-rest's) `bench/all.sh` measured this repository in session

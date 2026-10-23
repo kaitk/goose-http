@@ -141,7 +141,9 @@ Where io_uring isn't available, such as under Docker's default seccomp profile, 
 io_uring disabled, or on an older kernel, the ring falls back to the emulation in
 `shim/ring_epoll.c`. `http::ring_probe()` reports why, `Config.emulate_ring`
 selects the emulation for tests, and `Config.require_ring` makes `serve` fail instead
-of falling back: `ring_create`'s `RING_REQUIRE` returns io_uring's error.
+of falling back: `ring_create`'s `RING_REQUIRE` returns io_uring's error. The
+emulation tries a synchronous `send(2)` for a send of at least 16 KB whose socket is
+writable with nothing queued, and copies only the bytes the socket didn't take.
 
 ### Platforms
 
