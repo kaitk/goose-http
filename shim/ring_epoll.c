@@ -10,8 +10,8 @@
    empty, both again at each edge-triggered event. On macOS the listener is
    level-triggered and net_accept declines past the worker's share
    (shim/kqueue.c), so the listener is watched only while an accept goes on.
-   A send tries an empty, writable socket queue before copying its unsent
-   bytes. Its completion is delivered in ur_wait, and what the socket
+   A large send tries an empty, writable socket queue before copying its
+   unsent bytes. Its completion is delivered in ur_wait, and what the socket
    doesn't take waits for its writable edge, which is watched only
    then: kqueue reports EV_CLEAR's write filter as each ACK frees buffer
    space. Completions that don't fit in ur_wait's out wait in a queue for the
@@ -108,6 +108,10 @@ struct rp_send {
 #define RP_SMALL (RP_MIN << (RP_CLASSES - 1))
 #define RP_BIG 65536
 #define RP_KEEP (4u << 20)
+
+/* Small writes stay queued so a pipelined receive is handled before output
+   wakes clients. Larger writes can avoid copying bytes the socket accepts. */
+#define RP_INLINE 16384
 
 /* What the ring knows of a socket, indexed by its fd. */
 struct rp_fd {
@@ -347,7 +351,7 @@ void RP(recv)(int64_t h, int32_t fd, uint64_t tag) {
     rp_queue(u, fd);
 }
 
-/* Tries data immediately when no send precedes it on a writable fd, owning
+/* Tries large data immediately when no send precedes it on a writable fd, owning
    any unsent tail before returning. Even a full send completes in ur_wait,
    so completion accounting and drain callbacks keep their usual turn. */
 int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
@@ -363,7 +367,7 @@ int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
     s->len = (uint32_t)data.len;
     s->off = 0;
     s->file = -1;
-    if (!f->sends && f->writable && data.len > 0) {
+    if (data.len >= RP_INLINE && !f->sends && f->writable) {
         int64_t sent = net_send(fd, data);
         if (sent > 0) s->off = (uint32_t)sent;
         else if (sent == -RP_EAGAIN) f->writable = 0;

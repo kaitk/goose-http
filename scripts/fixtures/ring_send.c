@@ -21,7 +21,7 @@ static void *test_malloc(size_t n) {
 #undef malloc
 #undef memcpy
 
-static unsigned char received[1024];
+static unsigned char received[RP_INLINE * 4];
 static size_t received_len;
 static int64_t outcomes[16];
 static int outcome_count, outcome_at, calls, writable_edge, file_closed;
@@ -75,17 +75,19 @@ static void expect(rp_completion c, uint64_t tag, int32_t res) {
 }
 static void full_and_ordered(void) {
     int64_t h = setup();
-    unsigned char a[] = "abc", b[] = "def";
+    unsigned char a[RP_INLINE], b[] = "def";
+    memset(a, 'a', sizeof a);
     rp_completion c[2] = {0};
-    assert(RP(send)(h, 7, 11, (rp_bytes){a, 3}) == 0);
-    assert(copied == 0 && received_len == 3 && calls == 1);
+    assert(RP(send)(h, 7, 11, (rp_bytes){a, sizeof a}) == 0);
+    assert(copied == 0 && received_len == sizeof a && calls == 1);
     assert(RP(send)(h, 7, 12, (rp_bytes){b, 3}) == 0);
     assert(copied == 3 && calls == 1);
-    memset(a, 'x', 3); memset(b, 'x', 3);
+    memset(a, 'x', sizeof a); memset(b, 'x', 3);
     /* A one-slot result must preserve overflow completion order. */
     assert(RP(wait)(h, (rp_completions){c, 1}, 0) == 1);
-    expect(c[0], 11, 3);
-    assert(received_len == 6 && memcmp(received, "abcdef", 6) == 0);
+    expect(c[0], 11, sizeof a);
+    assert(received_len == sizeof a + 3 && memcmp(received + sizeof a, "def", 3) == 0);
+    for (size_t i = 0; i < sizeof a; i++) assert(received[i] == 'a');
     assert(RP(wait)(h, (rp_completions){c, 1}, 0) == 1);
     expect(c[0], 12, 3);
     assert(RP(wait)(h, (rp_completions){c, 1}, 0) == 0);
@@ -93,43 +95,46 @@ static void full_and_ordered(void) {
 }
 static void stalled_tail(int64_t first) {
     int64_t h = setup();
-    unsigned char a[] = "abcdef", b[] = "ghi";
+    unsigned char a[RP_INLINE], b[] = "ghi";
+    memset(a, 'a', sizeof a);
     rp_completion c[2];
     outcomes[0] = first;
     outcomes[1] = -RP_EAGAIN;
     outcome_count = first > 0 ? 2 : 1;
-    assert(RP(send)(h, 7, 21, (rp_bytes){a, 6}) == 0);
-    assert(copied == (size_t)(first > 0 ? 6 - first : 6));
+    assert(RP(send)(h, 7, 21, (rp_bytes){a, sizeof a}) == 0);
+    assert(copied == sizeof a - (size_t)(first > 0 ? first : 0));
     assert(RP(send)(h, 7, 22, (rp_bytes){b, 3}) == 0);
     assert(calls == 1);
-    memset(a, 'x', 6); memset(b, 'x', 3);
+    memset(a, 'x', sizeof a); memset(b, 'x', 3);
     assert(RP(wait)(h, (rp_completions){c, 2}, 0) == 0);
     assert(watching & RP_OUT);
     writable_edge = 1;
     assert(RP(wait)(h, (rp_completions){c, 2}, 0) == 2);
-    expect(c[0], 21, 6); expect(c[1], 22, 3);
-    assert(received_len == 9 && memcmp(received, "abcdefghi", 9) == 0);
+    expect(c[0], 21, sizeof a); expect(c[1], 22, 3);
+    assert(received_len == sizeof a + 3 && memcmp(received + sizeof a, "ghi", 3) == 0);
+    for (size_t i = 0; i < sizeof a; i++) assert(received[i] == 'a');
     assert(!(watching & RP_OUT));
     RP(destroy)(h);
 }
 static void errors_and_close(void) {
     int64_t h = setup();
-    unsigned char a[] = "abc";
+    unsigned char a[RP_INLINE];
+    memset(a, 'a', sizeof a);
     rp_completion c;
     outcomes[0] = -RP_EINTR; outcome_count = 1;
-    assert(RP(send)(h, 7, 31, (rp_bytes){a, 3}) == 0);
-    assert(copied == 3);
+    assert(RP(send)(h, 7, 31, (rp_bytes){a, sizeof a}) == 0);
+    assert(copied == sizeof a);
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
-    expect(c, 31, 3);
+    expect(c, 31, sizeof a);
     outcomes[1] = outcomes[2] = -32; outcome_count = 3;
-    assert(RP(send)(h, 7, 32, (rp_bytes){a, 3}) == 0);
+    assert(RP(send)(h, 7, 32, (rp_bytes){a, sizeof a}) == 0);
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
     expect(c, 32, -32);
-    assert(RP(send)(h, 7, 33, (rp_bytes){a, 3}) == 0);
+    assert(RP(send)(h, 7, 33, (rp_bytes){a, sizeof a}) == 0);
     RP(close)(h, 7);
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
     outcomes[3] = -RP_EAGAIN; outcome_count = 4;
-    assert(RP(send)(h, 7, 34, (rp_bytes){a, 3}) == 0);
+    assert(RP(send)(h, 7, 34, (rp_bytes){a, sizeof a}) == 0);
     RP(close)(h, 7);
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
     RP(destroy)(h);
@@ -137,18 +142,39 @@ static void errors_and_close(void) {
 static void files_and_allocation(void) {
     int64_t h = setup();
     rp_completion c[2];
-    unsigned char a[] = "end";
+    unsigned char a[RP_INLINE];
+    memset(a, 'a', sizeof a);
     fail_alloc = 1;
-    assert(RP(send)(h, 7, 40, (rp_bytes){a, 3}) == -RP_ENOMEM);
+    assert(RP(send)(h, 7, 40, (rp_bytes){a, sizeof a}) == -RP_ENOMEM);
     assert(calls == 0 && received_len == 0);
     assert(RP(send_file)(h, 7, 41, 101, 0, 4) == 0);
-    assert(RP(send)(h, 7, 42, (rp_bytes){a, 3}) == 0);
-    assert(calls == 0 && copied == 3);
-    memset(a, 'x', 3);
+    assert(RP(send)(h, 7, 42, (rp_bytes){a, sizeof a}) == 0);
+    assert(calls == 0 && copied == sizeof a);
+    memset(a, 'x', sizeof a);
     assert(RP(wait)(h, (rp_completions){c, 2}, 0) == 2);
-    expect(c[0], 41, 4); expect(c[1], 42, 3);
-    assert(received_len == 7 && memcmp(received, "FILEend", 7) == 0 && file_closed == 1);
+    expect(c[0], 41, 4); expect(c[1], 42, sizeof a);
+    assert(received_len == sizeof a + 4 && memcmp(received, "FILE", 4) == 0 && file_closed == 1);
+    for (size_t i = 4; i < received_len; i++) assert(received[i] == 'a');
     RP(destroy)(h);
+}
+static void inline_boundary(void) {
+    const size_t lengths[] = {0, 1, RP_INLINE - 1, RP_INLINE};
+    for (size_t i = 0; i < sizeof lengths / sizeof lengths[0]; i++) {
+        int64_t h = setup();
+        unsigned char a[RP_INLINE];
+        memset(a, 'a', sizeof a);
+        size_t n = lengths[i];
+        rp_completion c;
+        assert(RP(send)(h, 7, 51, (rp_bytes){n ? a : NULL, n}) == 0);
+        assert(calls == (n >= RP_INLINE ? 1 : 0));
+        assert(copied == (n >= RP_INLINE ? 0 : n));
+        memset(a, 'x', sizeof a);
+        assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
+        expect(c, 51, (int32_t)n);
+        assert(received_len == n);
+        for (size_t j = 0; j < n; j++) assert(received[j] == 'a');
+        RP(destroy)(h);
+    }
 }
 int main(void) {
     full_and_ordered();
@@ -156,5 +182,6 @@ int main(void) {
     stalled_tail(-RP_EAGAIN);
     errors_and_close();
     files_and_allocation();
+    inline_boundary();
     puts("ring send ownership, ordering, backpressure, and completion tests passed");
 }
