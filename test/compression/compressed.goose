@@ -3,7 +3,7 @@
 // scripts/http_client.py compress decompresses real responses.
 import std;
 import http from "../../";
-import compress from "github.com/kaitk/goose-compress@v0.1.3";
+import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import http.compression;
 import check from "../";
 
@@ -67,6 +67,15 @@ fn test_whole() {
     compress::compress(t, want, compress::GZIP, 1);
     assert(body == want);
     print("gzip: ", t.len, " bytes to ", body.len, ", as compress gives");
+
+    // 256 bytes and up are compressed: min_size's default.
+    out.clear();
+    respond("GET", gzip, 200, "application/json", t[..256], out);
+    assert(value_of(out, "Content-Encoding") == "gzip");
+    out.clear();
+    respond("GET", gzip, 200, "application/json", t[..255], out);
+    assert(value_of(out, "Content-Encoding") == "");
+    print("min_size: 256 bytes compressed, 255 not");
 
     out.clear();
     respond("GET", "Accept-Encoding: deflate\r\n", 200, "text/plain", t, out);

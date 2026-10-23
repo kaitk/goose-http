@@ -958,6 +958,22 @@ Rejected: a cancel by tag of the receive alone, which leaves a send to a client 
 doesn't read holding the socket open; and the shim tracking whether each fd's receive
 is queued, which needs the fd on the completion path, where the loop already knows.
 
+### Bodies from 256 bytes are compressed
+
+Decided 2026-10-23, task 022.
+
+`http::Compression`'s `min_size` is 256 bytes, down from 1,024. gzip at level 1 saves
+bytes on the wire from about 160 to 192 bytes of JSON on: below that, its 18 bytes of
+header and trailer and the 24-byte `Content-Encoding: gzip` line outweigh what it
+saves. Measured on prefixes of HttpArena's `/json/50` body and its `dataset.json`, with
+goose-compress `v0.1.4`: at 256 bytes, compressing saves 36 and 56 bytes; at 512, 216
+and 245; at 128, it costs 23 and 11. At 1,024, an 888-byte JSON answer such as
+json-comp's `/json/5` went out raw where Aegon's gzip sends 385 bytes. nginx's default
+`gzip_min_length` is 20 bytes, and Aegon's json-comp entry compresses from 64.
+
+The trade-off: a body of 256 to 1,023 bytes now costs a compression call, a few µs at
+level 1.
+
 ## Not yet decided
 
 ### Compression in an optional module
@@ -965,8 +981,7 @@ is queued, which needs the fd on the completion path, where the loop already kno
 Implemented, with no recorded approval; task 022.
 
 Precompressed files need no codec. Dynamic compression is implemented in the optional
-`http.compression` module using goose-compress's pure-Goose gzip, deflate, and zstd
-encoders. Negotiation and response framing stay in `http`; codecs import nothing of
+`http.compression` module using goose-compress's gzip, deflate, and zstd encoders. Negotiation and response framing stay in `http`; codecs import nothing of
 HTTP. Programs without the module need no codec dependency. Compression remains part
 of measuring Goose; TLS crypto is outside this project's scope. Task 022 retains the
 split's unrecorded approval and remaining validation.

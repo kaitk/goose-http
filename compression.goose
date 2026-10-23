@@ -4,7 +4,7 @@
 // which its root file declares at the tag this file names:
 //
 //   import http from "github.com/kaitk/goose-http@<tag>";
-//   import compress from "github.com/kaitk/goose-compress@v0.1.3";
+//   import compress from "github.com/kaitk/goose-compress@v0.1.4";
 //   import http.compression;
 //
 // A whole response:
@@ -20,7 +20,7 @@
 namespace http;
 
 import std;
-import compress from "github.com/kaitk/goose-compress@v0.1.3";
+import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import message;
 import media;
 
@@ -30,8 +30,9 @@ enum Coding { Identity, Gzip, Deflate, Zstd }
 // Config, so that a program without compression builds the loops as before.
 struct Compression {
     // A body shorter than this goes uncompressed: its coding's header and
-    // trailer would outweigh what it saves.
-    min_size: i64 = 1024,
+    // trailer would outweigh what it saves (docs/decisions.md, "Bodies from
+    // 256 bytes are compressed").
+    min_size: i64 = 256,
     // gzip's and deflate's level, 1 to 9, and zstd's, 1 to 22. Level 1 is
     // nginx's default, and the fastest of each.
     level: i64 = 1,

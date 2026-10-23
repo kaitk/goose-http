@@ -1,4 +1,5 @@
 gzip: 2015 bytes to 67, as compress gives
+min_size: 256 bytes compressed, 255 not
 deflate and zstd: their magic bytes
 left alone: no Accept-Encoding, 206, HEAD, 304, a short body, an image
 streamed gzip: flushed pieces, chunked

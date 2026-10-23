@@ -6,7 +6,7 @@
 //   curl -H 'Accept-Encoding: zstd' localhost:8080/count/1000 | zstd -d
 import std;
 import http from "../../";
-import compress from "github.com/kaitk/goose-compress@v0.1.3";
+import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import http.compression;
 
 // An exchange's state: the encoder of a streamed response, and the lines
@@ -31,7 +31,7 @@ fn handle(ev: http::Event, st: St&, out: http::Reply) {
         var r = http::router(ev.req);
         if http::on(r, "GET", "/report") {
             // A whole response: compressed when the client takes a coding and
-            // the body is at least Compression.min_size, 1 KB by default.
+            // the body is at least Compression.min_size, 256 bytes by default.
             var body: u8[>..] = [];
             body.push('[');
             for i in 200 {

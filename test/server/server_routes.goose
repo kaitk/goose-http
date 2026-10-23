@@ -3,7 +3,7 @@
 // directory.
 import std;
 import http from "../../";
-import compress from "github.com/kaitk/goose-compress@v0.1.3";
+import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import routes from "../../server";
 import check from "../";
