@@ -131,11 +131,11 @@ static void errors_and_close(void) {
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
     expect(c, 32, -32);
     assert(RP(send)(h, 7, 33, (rp_bytes){a, sizeof a}) == 0);
-    RP(close)(h, 7);
+    RP(close)(h, 7, 0);
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
     outcomes[3] = -RP_EAGAIN; outcome_count = 4;
     assert(RP(send)(h, 7, 34, (rp_bytes){a, sizeof a}) == 0);
-    RP(close)(h, 7);
+    RP(close)(h, 7, 0);
     assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
     RP(destroy)(h);
 }
