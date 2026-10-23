@@ -3,6 +3,10 @@
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/scripts/goose.sh"
+mkdir -p "$root/build"
+"${CC:-gcc}" -O2 -Wall -Wextra -Wno-unused-parameter \
+    "$root/scripts/fixtures/ring_send.c" -o "$root/build/ring-send"
+"$root/build/ring-send"
 "$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/drain-turns" \
     "$root/scripts/fixtures/drain_turns.goose"
 python3 "$root/scripts/test-drain-turns.py" "$root/build/drain-turns"

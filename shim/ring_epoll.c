@@ -10,8 +10,9 @@
    empty, both again at each edge-triggered event. On macOS the listener is
    level-triggered and net_accept declines past the worker's share
    (shim/kqueue.c), so the listener is watched only while an accept goes on.
-   A send's bytes are copied and sent in the next ur_wait, and what the
-   socket doesn't take waits for its writable edge, which is watched only
+   A send tries an empty, writable socket queue before copying its unsent
+   bytes. Its completion is delivered in ur_wait, and what the socket
+   doesn't take waits for its writable edge, which is watched only
    then: kqueue reports EV_CLEAR's write filter as each ACK frees buffer
    space. Completions that don't fit in ur_wait's out wait in a queue for the
    next call. Every call returns the same Linux errno values as the rest of
@@ -346,8 +347,9 @@ void RP(recv)(int64_t h, int32_t fd, uint64_t tag) {
     rp_queue(u, fd);
 }
 
-/* Copies data, to send it in the next ur_wait after any sends queued before
-   it on fd. */
+/* Tries data immediately when no send precedes it on a writable fd, owning
+   any unsent tail before returning. Even a full send completes in ur_wait,
+   so completion accounting and drain callbacks keep their usual turn. */
 int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
     struct rp *u = (struct rp *)(intptr_t)h;
     struct rp_fd *f = rp_fd_of(u, fd);
@@ -361,7 +363,14 @@ int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
     s->len = (uint32_t)data.len;
     s->off = 0;
     s->file = -1;
-    memcpy(s->data, data.data, (size_t)data.len);
+    if (!f->sends && f->writable && data.len > 0) {
+        int64_t sent = net_send(fd, data);
+        if (sent > 0) s->off = (uint32_t)sent;
+        else if (sent == -RP_EAGAIN) f->writable = 0;
+        /* Other errors follow the queued send's ordinary retry/error path. */
+    }
+    if (s->off < s->len)
+        memcpy(s->data + s->off, data.data + s->off, (size_t)(s->len - s->off));
     if (f->last) f->last->next = s;
     else f->sends = s;
     f->last = s;
