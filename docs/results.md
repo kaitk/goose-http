@@ -68,6 +68,14 @@ throughput and spent 4.1% more CPU time while cycles fell 3.0%. Task-clock inclu
 idle time around the batch, and the client ran near its four-core limit, so the rates
 aren't capacity. The Rust and Jai Campfire servers weren't rerun beside the 16 KB build.
 
+**Large responses on the desktop lose (2026-10-23).** On the [desktop](#machine), four
+workers and 256 connections fetching a 21 KB body, natively with `LOOP=uring-epoll` and
+Clang: the base `df12a62` serves 195.0 K and 193.8 K req/s in two runs, at 20.5-20.7 µs
+per request, and the PR 140.3 K and 138.0 K at 28.5-29.0 µs, 28% fewer. In Docker
+under its default seccomp profile, with gcc, against `main`, the PR loses 27% at 21 KB
+and 15% at 64 KB. Pipelined plaintext shows no difference beyond an A/A control of the
+base against itself, which differs by 2.5%.
+
 ## 2026-10-22: v0.5.4, Goose builds only
 
 Plod's (then goose-rest's) `bench/all.sh` measured this repository in session
