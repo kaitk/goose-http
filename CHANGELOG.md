@@ -2,6 +2,22 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.8 (2026-10-23)
+
+Compression from 256 bytes, and goose-compress `v0.1.4`. Goose `v2026.3`, goose-hash
+`v0.0.4`, goose-tls `v0.0.5`, and goose-compress `v0.1.4`.
+
+Changed:
+
+- `http::Compression`'s `min_size` is 256 bytes, down from 1,024: gzip saves bytes on
+  JSON from about 192 bytes on, and an 888-byte answer went out raw
+  ([decisions](docs/decisions.md#bodies-from-256-bytes-are-compressed)). A program
+  that wants the old threshold passes `http::Compression { min_size: 1024, .. }`.
+- goose-compress `v0.1.4`, whose DEFLATE level 1 matcher and symbol coder are C, with
+  the same bytes: gzip at level 1 takes 12 to 15 percent less time on 4 to 8 KB JSON
+  bodies.
+- The drain example stops on SIGTERM, so its io_uring listener closes.
+
 ## v0.5.7 (2026-10-23)
 
 An io_uring send fix, and goose-compress `v0.1.3`. Goose `v2026.3`, goose-hash
