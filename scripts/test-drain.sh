@@ -1,5 +1,7 @@
 #!/bin/sh
-# Builds and tests mailbox and direct drain publishers on the two Unix loops.
+# Tests the emulated ring's sends against scripted socket results
+# (fixtures/ring_send.c), then builds and tests mailbox and direct drain
+# publishers on the two Unix loops.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/scripts/goose.sh"
