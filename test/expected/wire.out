@@ -1,0 +1,24 @@
+c2197c5eff14e88c = 151288809941952652, written c2197c5eff14e88c
+9d7f3e7d = 494878333, written 9d7f3e7d
+7bbd = 15293, written 7bbd
+25 = 37, written 25
+4025 = 37, written 25
+a truncated one: true
+decoded: a82f9b32
+bytes for 0xac5c02 after 0xabe8b3: 2
+bytes for 0xace8fe after 0xabe8b3: 3
+bytes for the first: 1
+ranges: [12-12][7-9][4-5][0-2]
+a duplicate: false
+filled: [12-12][0-9]
+ACK: 020c40fa01000109
+read back: [12-12][0-9], largest 12, delay 250, true
+a client's: true
+  initial_max_data 1048576, initial_max_streams_bidi 100, max_ack_delay 25
+another Source Connection ID: false
+one that names an original_destination_connection_id: false
+B.1: :path: /index.html; 
+B.2: refused
+encoded: 0000d9f5540231335f4d8498e7417f2f02f2b585ed6950958d27841c640899
+decoded: :status: 200; content-type: text/plain; content-length: 13; server: goose; x-request-id: abc123; 
+418: :status: 418; 

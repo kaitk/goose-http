@@ -20,21 +20,21 @@ generation from OpenAPI, see [Plod](https://github.com/kaitk/plod).
 
 | | Protocol | Notes |
 |---|---|---|
-| 🟢 | HTTP/1.1 | Keep-alive, pipelining, chunked bodies, trailers, and `Expect: 100-continue`. Also supports HTTP/1.0. |
-| 🟢 | Compression | Files compressed with Brotli, Zstandard, or gzip; on-the-fly gzip, deflate, and Zstandard with [goose-compress](https://github.com/kaitk/goose-compress). |
-| 🟡 | HTTP/2 | h2c, HTTP/2 over TCP with prior knowledge, on a port of its own ([API](docs/api.md#several-ports-and-h2c)), and h2 over TLS, chosen by ALPN ([API](docs/api.md#https)), on Linux and macOS. Passes h2spec both ways. Not yet on Windows. |
-| 🟡 | TLS | HTTPS: HTTP/1.1 and h2 over TLS 1.3 on both loops on Linux and macOS, on one port, as ALPN chooses, from the module `http.tls` with [goose-tls](https://github.com/kaitk/goose-tls)'s server in Goose over OpenSSL 3's libcrypto, about 2.9 KB per idle connection ([API](docs/api.md#https)). A program can choose each connection's context at its ClientHello, as for ACME's TLS-ALPN-01. Not yet on Windows. |
-| 🟢 | WebSocket | RFC 6455: text and binary messages, fragments, ping, and close, in the optional `http.websocket` module, with SHA-1 from [goose-hash](https://github.com/kaitk/goose-hash) ([API](docs/api.md#websocket)). Passes Autobahn's test suite. No extensions, such as permessage-deflate, and not over HTTP/2. |
-| 🟡 | Outbound connections | TCP and Unix sockets to other servers, such as a database: blocking calls with time limits for a lane's thread, and non-blocking ones on the epoll, kqueue, and io_uring loops, where the exchange waits for the socket ([API](docs/api.md#outbound-connections)). Not yet on the emulated ring or IOCP. The blocking `connect` resolves host names; the loop's `connect_start` doesn't yet. |
-| 🟡 | HTTP client | HTTP/1.1 and HTTPS requests from a lane's thread or a program without a loop, with a kept connection, fields, and a JSON body, in the optional `http.client` module ([API](docs/api.md#an-http-client)). Blocking only; needs goose-tls, so not yet on Windows. |
-| ⚪ | HTTP/3 | Deferred until QUIC on Linux matures; it currently uses more CPU than TCP for the same traffic. |
+| 🟢 | HTTP/1.1 | Keep-alive, pipelining, chunked bodies, trailers, `100-continue`, and HTTP/1.0. |
+| 🟢 | Compression | Precompressed files, and gzip, deflate, and zstd on the fly ([goose-compress](https://github.com/kaitk/goose-compress)). |
+| 🟡 | HTTP/2 | h2c, and h2 over TLS by ALPN; passes h2spec ([API](docs/api.md#several-ports-and-h2c)). Not on Windows yet. |
+| 🟡 | TLS | TLS 1.3 with [goose-tls](https://github.com/kaitk/goose-tls), its server in Goose; a context per connection, as for ACME ([API](docs/api.md#https)). Not on Windows yet. |
+| 🟢 | WebSocket | RFC 6455, an optional module; passes Autobahn ([API](docs/api.md#websocket)). No extensions. |
+| 🟡 | Outbound connections | TCP and Unix sockets, blocking or on the loop ([API](docs/api.md#outbound-connections)). Not on IOCP or the emulated ring yet. |
+| 🟡 | HTTP client | HTTP/1.1 and HTTPS, blocking, an optional module ([API](docs/api.md#an-http-client)). Not on Windows yet. |
+| 🟡 | HTTP/3 | QUIC written in Goose, off unless a listener asks, an optional module ([API](docs/api.md#http3)). Linux and macOS; no `later`, 0-RTT, or migration yet. |
 
 | | Platform | Notes |
 |---|---|---|
 | 🟢 | Linux | io_uring (kernel 6.1+) or epoll ([which loop](docs/api.md#event-loops)). |
 | 🟢 | macOS | kqueue. |
 | 🟢 | Windows | I/O completion ports (IOCP). |
-| 🟡 | Embedded Linux | aarch64 cross-builds pass tests under emulation, but have not yet been tested on a board ([embedded Linux](docs/embedded.md)). |
+| 🟡 | Embedded Linux | aarch64 builds pass under emulation; not yet tried on a board ([embedded Linux](docs/embedded.md)). |
 
 ## What it provides
 

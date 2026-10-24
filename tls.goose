@@ -34,7 +34,7 @@
 namespace http;
 
 import std;
-import tls from "github.com/kaitk/goose-tls@v0.0.5";
+import tls from "../goose-tls-quic";
 import sys;
 import epoll;
 
@@ -255,3 +255,15 @@ fn tls_close<C>(t: TlsServerOf<C>&, k: i32, fd: i32, clean: bool) {
     t.slots[k] = TlsSlot { conn: tls::Conn { .. }, ready: false, notified: false, next: t.free };
     t.free = k;
 }
+
+// A loop with a TlsServer alone serves no HTTP/3, which needs http.h3's
+// H3Server beside it; the loops call these only where h3_serves.
+fn h3_serves<C>(t: TlsServerOf<C>&) -> bool { false }
+fn h3_listen<C>(t: TlsServerOf<C>&, cfg: const Config&, k: i64, port: i32) -> Error { Error { call: "h3", code: EINVAL } }
+fn h3_listener<C>(t: TlsServerOf<C>&, key: u64) -> i64 { -1 }
+fn h3_ready<C, S, H>(t: TlsServerOf<C>&, k: i64, cfg: const Config&, fresh: const S&, common: const u8[:], now: i64) {}
+fn h3_wait<C>(t: TlsServerOf<C>&, now: i64, limit: i32) -> i32 { limit }
+fn h3_tick<C, S, H>(t: TlsServerOf<C>&, cfg: const Config&, fresh: const S&, common: const u8[:], now: i64) {}
+fn h3_stop<C>(t: TlsServerOf<C>&, now: i64) {}
+fn h3_count<C>(t: TlsServerOf<C>&) -> i64 { 0 }
+fn h3_end<C, H>(t: TlsServerOf<C>&) {}

@@ -440,6 +440,76 @@ int32_t net_port(int32_t fd) {
     return -net_err(EAFNOSUPPORT);
 }
 
+/* ---- UDP, for QUIC (h3.goose): shim/net.c's, a datagram per call ---- */
+
+typedef struct { int32_t len; uint8_t addr[28]; } net_udp_peer;
+typedef struct { net_udp_peer *data; int64_t len; } net_udp_peers;
+typedef struct { int32_t *data; int64_t len; } net_i32s;
+_Static_assert(sizeof(net_udp_peer) == 32 && sizeof(struct sockaddr_in6) <= 28, "UdpPeer's layout");
+
+/* macOS's SO_REUSEPORT gives a unicast datagram to one of the sockets
+   bound, so a program serving h3 on macOS runs one worker. */
+int32_t net_udp_open(net_bytes addr, int32_t port, int32_t flags) {
+    struct sockaddr_storage ss;
+    socklen_t len;
+    int err = net_sockaddr(addr, port, flags & ~NET_UNIX, &ss, &len);
+    if (err) return -net_err(err);
+    int fd = socket(ss.ss_family, SOCK_DGRAM, 0);
+    if (fd < 0) return -net_err(errno);
+    int one = 1, v6only = (flags & NET_V6ONLY) != 0, size = 4 << 20;
+    int ok = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 &&
+             (!(flags & NET_REUSEPORT) || setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) == 0) &&
+             (ss.ss_family != AF_INET6 || setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof v6only) == 0);
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size);
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+    if (!ok || bind(fd, (struct sockaddr *)&ss, len) < 0) {
+        int e = errno;
+        close(fd);
+        return -net_err(e);
+    }
+    return fd;
+}
+
+int32_t net_udp_recv(int32_t fd, net_bytes buf, int32_t slot, net_i32s sizes, net_udp_peers peers) {
+    int64_t n = sizes.len < peers.len ? sizes.len : peers.len;
+    if (slot <= 0) return -net_err(EINVAL);
+    if (n > buf.len / slot) n = buf.len / slot;
+    if (n <= 0) return -net_err(EINVAL);
+    int32_t got = 0;
+    while (got < n) {
+        socklen_t len = sizeof peers.data[got].addr;
+        ssize_t r = recvfrom(fd, buf.data + (int64_t)got * slot, (size_t)slot, MSG_DONTWAIT | MSG_TRUNC,
+                             (struct sockaddr *)peers.data[got].addr, &len);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            if (got > 0) break;
+            return -net_err(errno);
+        }
+        sizes.data[got] = r > slot ? 0 : (int32_t)r;
+        peers.data[got].len = (int32_t)len;
+        got++;
+    }
+    return got;
+}
+
+int32_t net_udp_send(int32_t fd, net_bytes buf, net_i32s sizes, net_udp_peers peers, uint8_t gso) {
+    (void)gso;
+    int64_t at = 0;
+    int32_t sent = 0;
+    if (sizes.len > peers.len) return -net_err(EINVAL);
+    for (int64_t i = 0; i < sizes.len; i++) {
+        if (at + sizes.data[i] > buf.len) return -net_err(EINVAL);
+        ssize_t r;
+        do r = sendto(fd, buf.data + at, (size_t)sizes.data[i], 0, (struct sockaddr *)peers.data[i].addr,
+                      (socklen_t)peers.data[i].len);
+        while (r < 0 && errno == EINTR);
+        if (r < 0) return sent > 0 ? sent : -net_err(errno);
+        at += sizes.data[i];
+        sent++;
+    }
+    return sent;
+}
+
 /* A non-blocking socket connecting to what addr, port, and NET_UNIX in flags
    name, as net_listen's do, but for an empty addr, which names no peer. A TCP
    one has TCP_NODELAY, as libpq's has. Returns the fd once connect has

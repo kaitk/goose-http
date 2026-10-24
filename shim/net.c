@@ -11,6 +11,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -257,6 +258,145 @@ int32_t net_port(int32_t fd) {
     if (ss.ss_family == AF_INET) return ntohs(((struct sockaddr_in *)&ss)->sin_port);
     if (ss.ss_family == AF_INET6) return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
     return -EAFNOSUPPORT;
+}
+
+/* ---- UDP, for QUIC (h3.goose) ---- */
+
+/* A datagram's peer, as sys.goose's UdpPeer: its socket address, as the
+   kernel gave it, and that address's length. */
+typedef struct { int32_t len; uint8_t addr[28]; } net_udp_peer;
+typedef struct { net_udp_peer *data; int64_t len; } net_udp_peers;
+typedef struct { int32_t *data; int64_t len; } net_i32s;
+_Static_assert(sizeof(net_udp_peer) == 32 && sizeof(struct sockaddr_in6) <= 28, "UdpPeer's layout");
+
+/* The most datagrams one call takes or gives, and the most segments one
+   UDP_SEGMENT send carries, the kernel's UDP_MAX_SEGMENTS. */
+#define NET_UDP_BATCH 64
+#define NET_GSO_SEGMENTS 64
+#ifndef UDP_SEGMENT
+#define UDP_SEGMENT 103
+#endif
+
+/* A non-blocking UDP socket bound to what addr, port, and flags name, as
+   net_listen's do, with SO_REUSEPORT under NET_REUSEPORT, so that each
+   worker has its own and the kernel keeps a peer's datagrams on one. Its
+   buffers are asked for at 4 MB, which the kernel caps at net.core's
+   rmem_max and wmem_max, and its datagrams aren't fragmented (RFC 9000,
+   section 14). */
+int32_t net_udp_open(net_bytes addr, int32_t port, int32_t flags) {
+    struct sockaddr_storage ss;
+    socklen_t len;
+    int err = net_sockaddr(addr, port, flags & ~NET_UNIX, &ss, &len);
+    if (err) return -err;
+    int fd = socket(ss.ss_family, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return -errno;
+    int one = 1, v6only = (flags & NET_V6ONLY) != 0, size = 4 << 20, pmtu = IP_PMTUDISC_PROBE;
+    int ok = (!(flags & NET_REUSEPORT) || setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) == 0) &&
+             (ss.ss_family != AF_INET6 || setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof v6only) == 0);
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size);
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+    if (ss.ss_family == AF_INET) setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &pmtu, sizeof pmtu);
+    else setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &pmtu, sizeof pmtu);
+    if (!ok || bind(fd, (struct sockaddr *)&ss, len) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    return fd;
+}
+
+/* Receives up to sizes.len datagrams, each into its slot bytes of buf, from
+   slot * i: their sizes into sizes, and their peers into peers, which must be
+   as long. A datagram longer than its slot is cut short, and its size given
+   as 0. Returns how many, or -errno: EAGAIN once none waits. */
+int32_t net_udp_recv(int32_t fd, net_bytes buf, int32_t slot, net_i32s sizes, net_udp_peers peers) {
+    int64_t n = sizes.len < peers.len ? sizes.len : peers.len;
+    if (slot <= 0) return -EINVAL;
+    if (n > buf.len / slot) n = buf.len / slot;
+    if (n > NET_UDP_BATCH) n = NET_UDP_BATCH;
+    if (n <= 0) return -EINVAL;
+    struct mmsghdr msgs[NET_UDP_BATCH];
+    struct iovec iov[NET_UDP_BATCH];
+    memset(msgs, 0, sizeof(struct mmsghdr) * (size_t)n);
+    for (int64_t i = 0; i < n; i++) {
+        iov[i].iov_base = buf.data + i * slot;
+        iov[i].iov_len = (size_t)slot;
+        msgs[i].msg_hdr.msg_name = peers.data[i].addr;
+        msgs[i].msg_hdr.msg_namelen = sizeof peers.data[i].addr;
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+    int r;
+    do r = recvmmsg(fd, msgs, (unsigned)n, MSG_DONTWAIT, NULL);
+    while (r < 0 && errno == EINTR);
+    if (r < 0) return -errno;
+    for (int i = 0; i < r; i++) {
+        sizes.data[i] = (msgs[i].msg_hdr.msg_flags & MSG_TRUNC) ? 0 : (int32_t)msgs[i].msg_len;
+        peers.data[i].len = (int32_t)msgs[i].msg_hdr.msg_namelen;
+    }
+    return r;
+}
+
+/* Sends the datagrams that lie end to end in buf, sizes.len of them, each to
+   its peer in peers. With gso, a run of datagrams to one peer, each as long
+   as the first but the last, which may be shorter, goes as one send with
+   UDP_SEGMENT. Returns how many datagrams the kernel took, in order, or
+   -errno for none: EAGAIN when the socket's buffer is full, and EINVAL or
+   EIO where the kernel or the device can't segment, when the caller sends
+   again without gso. */
+int32_t net_udp_send(int32_t fd, net_bytes buf, net_i32s sizes, net_udp_peers peers, uint8_t gso) {
+    struct mmsghdr msgs[NET_UDP_BATCH];
+    struct iovec iov[NET_UDP_BATCH];
+    char cbuf[NET_UDP_BATCH][CMSG_SPACE(sizeof(uint16_t))];
+    int counts[NET_UDP_BATCH];
+    int64_t i = 0, at = 0;
+    int32_t total = 0;
+    if (sizes.len > peers.len) return -EINVAL;
+    while (i < sizes.len) {
+        int m = 0;
+        while (m < NET_UDP_BATCH && i < sizes.len) {
+            int64_t first = i, seg = sizes.data[i], len = 0;
+            net_udp_peer *p = &peers.data[i];
+            do {
+                len += sizes.data[i];
+                i++;
+            } while (gso && i < sizes.len && i - first < NET_GSO_SEGMENTS && sizes.data[i - 1] == seg &&
+                     sizes.data[i] <= seg && len + sizes.data[i] <= 65000 && peers.data[i].len == p->len &&
+                     memcmp(peers.data[i].addr, p->addr, (size_t)p->len) == 0);
+            if (at + len > buf.len) return -EINVAL;
+            memset(&msgs[m], 0, sizeof msgs[m]);
+            iov[m].iov_base = buf.data + at;
+            iov[m].iov_len = (size_t)len;
+            msgs[m].msg_hdr.msg_name = p->addr;
+            msgs[m].msg_hdr.msg_namelen = (socklen_t)p->len;
+            msgs[m].msg_hdr.msg_iov = &iov[m];
+            msgs[m].msg_hdr.msg_iovlen = 1;
+            counts[m] = (int)(i - first);
+            if (counts[m] > 1) {
+                msgs[m].msg_hdr.msg_control = cbuf[m];
+                msgs[m].msg_hdr.msg_controllen = sizeof cbuf[m];
+                struct cmsghdr *cm = CMSG_FIRSTHDR(&msgs[m].msg_hdr);
+                cm->cmsg_level = SOL_UDP;
+                cm->cmsg_type = UDP_SEGMENT;
+                cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
+                uint16_t s = (uint16_t)seg;
+                memcpy(CMSG_DATA(cm), &s, sizeof s);
+            }
+            at += len;
+            m++;
+        }
+        int done = 0;
+        while (done < m) {
+            int r = sendmmsg(fd, msgs + done, (unsigned)(m - done), 0);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                return total > 0 ? total : -errno;
+            }
+            for (int k = done; k < done + r; k++) total += counts[k];
+            done += r;
+        }
+    }
+    return total;
 }
 
 /* A non-blocking socket connecting to what addr, port, and NET_UNIX in flags

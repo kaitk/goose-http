@@ -39,11 +39,13 @@ import socket;
 
 // A listener beside Config.port's, at Config.address: its port, and whether
 // it serves h2c, HTTP/2 with prior knowledge (h2.goose), or HTTP/1.1 over
-// TLS (http.tls), rather than HTTP/1.1.
+// TLS (http.tls), rather than HTTP/1.1; and with h3, HTTP/3 over QUIC on a
+// UDP socket on the same port too (http.h3), which needs tls.
 struct Listener {
     port: i32 = 0,
     h2c: bool = false,
     tls: bool = false,
+    h3: bool = false,
 }
 
 // The most listeners a loop takes beside Config.port's.
@@ -66,6 +68,9 @@ struct Config {
     // ENOSYS on more, and on a TLS listener so far.
     h2c: bool = false,
     tls: bool = false,
+    // Whether port's listener serves HTTP/3 too, as Listener.h3 says. It
+    // needs the module http.h3 and the loops' forms that take an H3Server.
+    h3: bool = false,
     listeners: Listener[..MAX_LISTENERS] = [],
     // HTTP/2: the most streams a client may have open on a connection, up to
     // 256 (SETTINGS_MAX_CONCURRENT_STREAMS), and what it may send before a

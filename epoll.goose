@@ -71,6 +71,17 @@ fn tls_take(t: NoTls&, k: i32, bytes: const u8[:], out: u8[>..]&) -> bool { fals
 fn tls_seal(t: NoTls&, k: i32, w: u8[>..]&, from: i64, last: bool) -> bool { false }
 fn tls_close(t: NoTls&, k: i32, fd: i32, clean: bool) {}
 
+// Nor HTTP/3 (http.h3), whose hooks the loops call only where h3_serves.
+fn h3_serves(t: NoTls&) -> bool { false }
+fn h3_listen(t: NoTls&, cfg: const Config&, k: i64, port: i32) -> Error { Error { call: "h3", code: EINVAL } }
+fn h3_listener(t: NoTls&, key: u64) -> i64 { -1 }
+fn h3_ready<S, H>(t: NoTls&, k: i64, cfg: const Config&, fresh: const S&, common: const u8[:], now: i64) {}
+fn h3_wait(t: NoTls&, now: i64, limit: i32) -> i32 { limit }
+fn h3_tick<S, H>(t: NoTls&, cfg: const Config&, fresh: const S&, common: const u8[:], now: i64) {}
+fn h3_stop(t: NoTls&, now: i64) {}
+fn h3_count(t: NoTls&) -> i64 { 0 }
+fn h3_end<H>(t: NoTls&) {}
+
 // serve_epoll(cfg, fresh), with tls, a NoTls or http.tls's TlsServer, the
 // TLS of the listeners that serve it. A TLS connection's bytes pass through
 // tls between the socket and the worker's buffers: what it receives is
@@ -86,13 +97,17 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var lfds: i32[..MAX_LISTENERS + 1] = [];
     var h2c_at: bool[..MAX_LISTENERS + 1] = [];
     var tls_at: bool[..MAX_LISTENERS + 1] = [];
+    var h3_at: bool[..MAX_LISTENERS + 1] = [];
     for k in cfg.listeners.len + 1 {
         let h2c = if k == 0 { cfg.h2c } else { cfg.listeners[k - 1].h2c };
         let secure = if k == 0 { cfg.tls } else { cfg.listeners[k - 1].tls };
+        let h3 = if k == 0 { cfg.h3 } else { cfg.listeners[k - 1].h3 };
         // h2c is h2 by prior knowledge, over TCP; over TLS, ALPN chooses it.
         guard !secure || !h2c && tls_serves(tls) else { return Error { call: "tls", code: EINVAL }; }
+        guard !h3 || secure && h3_serves(tls) else { return Error { call: "h3", code: EINVAL }; }
         h2c_at.push(h2c);
         tls_at.push(secure);
+        h3_at.push(h3);
     }
     fn close_listeners() {
         for fd in lfds { if fd >= 0 { net_close(fd); } }
@@ -135,6 +150,20 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     let waiting = box.handle.slot >= 0;
     // For wait_socket, which watches outbound sockets on ep.
     net_loop_bind(ep);
+    if h3_serves(tls) {
+        for k in lfds.len {
+            if !h3_at[k] { continue; }
+            let opened3 = h3_listen(tls, cfg, k, if k == 0 { cfg.port } else { cfg.listeners[k - 1].port });
+            guard opened3.code == 0 else {
+                h3_end(tls, H);
+                net_loop_bind(-1);
+                close_waiting(box, waker);
+                net_close(ep);
+                close_listeners();
+                return opened3;
+            }
+        }
+    }
     var timers = timer_table(if waiting { cfg.max_waiting } else { 0 });
     // Exchanges owed TIMEOUT for want of a timer, by their keys.
     var overdue: u64[>..] = [];
@@ -556,6 +585,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             paused_at[k] = false;
         }
         paused = false;
+        if h3_serves(tls) { h3_stop(tls, now); }
         for i in conns.len {
             let c .= conns[i];
             // An h2c connection sends GOAWAY, and closes once its streams end.
@@ -644,7 +674,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     loop {
         // A wait ends within a second, for the sweep and a paused accept's
         // retry, or at the next timer; the waker ends it for mail and a stop.
-        let timeout: i32 = if hot || overdue.len > 0 || turns.len > 0 { 0 } else { wait_for(timers, now) };
+        var timeout: i32 = if hot || overdue.len > 0 || turns.len > 0 { 0 } else { wait_for(timers, now) };
+        if h3_serves(tls) { timeout = h3_wait(tls, now, timeout); }
         let n = net_epoll_wait(ep, events, timeout);
         if n == -EINTR { continue; }
         guard n >= 0 else {
@@ -669,6 +700,13 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; }
                 continue;
             }
+            if h3_serves(tls) {
+                let hk = h3_listener(tls, ev.tag);
+                if hk >= 0 {
+                    h3_ready(tls, hk, cfg, fresh, common, now, H);
+                    continue;
+                }
+            }
             // An outbound socket that wait_socket armed with its exchange's key.
             if waiting && ev.tag >= SOCKET_KEYS {
                 delivered(ev.tag, SOCKET_READY, "");
@@ -689,6 +727,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             if conns[i].fd >= 0 && conns[i].ready { go(i, true, none); }
         }
         drop_first(turns, listed);
+        if h3_serves(tls) { h3_tick(tls, cfg, fresh, common, now, H); }
         if waiting { expire(timers, now) { key => timed_out(key, true); }; }
         // With or without a box: without one, every later is owed its TIMEOUT.
         let owed = overdue.len;
@@ -700,11 +739,12 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
         if paused { accept_all(); }
         if !stopping && stops() != started { begin_stop(); }
-        if stopping && (open == 0 || now >= stop_by) { break; }
+        if stopping && (open == 0 && h3_count(tls) == 0 || now >= stop_by) { break; }
     }
     for i in conns.len {
         if conns[i].fd >= 0 { close_conn(i); }
     }
+    if h3_serves(tls) { h3_end(tls, H); }
     net_loop_bind(-1);
     close_waiting(box, waker);
     net_close(ep);

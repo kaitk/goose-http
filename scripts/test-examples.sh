@@ -217,6 +217,16 @@ if [ -z "$windows" ] && command -v openssl >/dev/null && { [ -z "${PREBUILT:-}" 
     holds hi
     expect 404 -k https://127.0.0.1:8443/nope
     end_example
+    # HTTP/3's example, over its TCP listeners: scripts/test-h3.sh speaks
+    # HTTP/3 to it.
+    if [ -z "${PREBUILT:-}" ] || [ -x "$bin/h3" ]; then
+        start h3 "$tmp/tls.crt" "$tmp/tls.key" "$root/test/fixtures/static"
+        expect 200 "$url/baseline2?a=1&b=2"
+        holds 3
+        expect 200 -k https://127.0.0.1:8443/static/small.txt
+        holds small
+        end_example
+    fi
 fi
 
 # The device's sysfs, faked: a thermal zone and an LED of its own. Windows has

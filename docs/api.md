@@ -1043,3 +1043,68 @@ fn main() {
 - With a chooser, a worker calls `serve` or `serve_epoll` with `fresh`: the forms
   without it take only an `http::TlsServer`.
 
+### HTTP/3
+
+HTTP/3 (RFC 9114) over QUIC version 1 is off unless a program asks for it: a listener
+with `h3` serves it on a UDP socket on its own port, beside its TLS over TCP, from
+the module `http.h3`. Only a program that imports that module has it. QUIC's
+handshake and packet protection are goose-tls's, so h3 needs a TLS listener, and the
+context's ALPN list must include `h3`:
+
+```rust
+import http from "github.com/kaitk/goose-http@<tag>";
+import tls from "github.com/kaitk/goose-tls@<tag>";
+import http.tls;
+import http.h3;
+
+thread_fn worker(cfg: http::Config, ctx: tls::Context) {
+    var server = http::tls_server(ctx);
+    var h3 = http::h3_server(ctx);
+    let e = http::serve_epoll(cfg, server, h3) { req, body, out =>
+        http::respond(out, 200, "text/plain", "Hello, World!");
+    };
+    http::release(h3);
+    http::release(server);
+    http::report(e);
+}
+
+fn main() {
+    let ctx, ok = tls::server_files("server.crt", "server.key", ["h3", "h2", "http/1.1"]);
+    guard ok else { write_stderr(str(tls::error_text(), "\n")); exit(1); }
+    var cfg = http::Config { port: 8080, .. };
+    cfg.listeners.push(http::Listener { port: 8443, tls: true, h3: true });
+    http::run(cfg, ctx, worker);
+    tls::free(ctx);
+}
+```
+
+- `Config.h3`, or a `Listener`'s `h3`, serves HTTP/3 on that listener's port too. It
+  needs `tls` on the same listener, and the forms of `serve` and `serve_epoll` that
+  take an `http::H3Server` beside the `TlsServer`; without them the loop fails with
+  `EINVAL` before it listens.
+- `http::h3_server(ctx)` gives a worker its `http::H3Server`, for the forms whose
+  handler takes the whole request, and `http::h3_server(ctx, fresh)` an
+  `http::H3ServerOf<S>` for the forms with state, whose `fresh` it takes.
+  `http::release(h3)` frees its reference to the context.
+- The handler is the one HTTP/1.1 and h2 call, with the same events: each request
+  stream is an exchange, its response is turned into HEADERS and DATA frames, and
+  files are read in pieces at `MORE`, as over TLS. `Reply.minor` is `H2_MINOR`, and
+  `Reply.fd` is -1: a request on a UDP socket has no socket of its own.
+- goose-http adds no `Alt-Svc` field. A browser finds h3 where the program's
+  responses over TCP name it, such as `Alt-Svc: h3=":8443"; ma=86400`.
+- A client may have 128 request streams open at once, and send 1 MiB on each and 16
+  MiB on the connection before more credit comes; the credit goes back as the handler
+  takes the bytes. A worker holds at most `Config.max_conns` QUIC connections, and
+  an idle one closes after 30 s.
+- On Linux each worker has its own socket, with `SO_REUSEPORT`, and the kernel keeps
+  a client's datagrams on one worker; runs of datagrams to one client go out
+  together with GSO where the kernel can segment them. On macOS, `SO_REUSEPORT` gives
+  every datagram to one of the workers' sockets. `http::serve` serves h3 over
+  io_uring only: on the ring it emulates it fails with `ENOSYS`, and so does Windows.
+- Not yet: an exchange can't wait, so `later` gets `TIMEOUT` with `NO_ROOM` at once;
+  no 0-RTT, no connection migration, no Retry, and no QPACK dynamic table, which
+  this side gives no capacity.
+
+`scripts/test-h3.sh` checks `examples/h3` with aioquic, an HTTP/3 client with a QUIC
+and TLS of its own, in a container.
+

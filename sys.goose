@@ -28,6 +28,7 @@ let V6ONLY: i32 = 8;      // net_listen only: an IPv6 listener takes no IPv4 cli
 // shim/net_win.c Winsock's and Win32's errors.
 let ENOENT = 2;
 let EINTR = 4;
+let EIO = 5;
 let EAGAIN = 11;
 let EACCES = 13;
 let ENOTDIR = 20;
@@ -90,6 +91,23 @@ extern fn net_close(fd: i32) -> i32;
 extern fn net_peer(fd: i32, out: u8[:]) -> i32;
 // The local port of socket fd, such as a listener's bound to port 0.
 extern fn net_port(fd: i32) -> i32;
+
+// UDP, for QUIC (h3.goose), on Linux and macOS; ENOSYS on Windows. A
+// datagram's peer: its socket address as the kernel gave it, len bytes of
+// addr.
+struct UdpPeer { len: i32, addr: u8[28] }
+// A non-blocking UDP socket on addr and port, as net_listen takes them, with
+// SO_REUSEPORT under REUSEPORT and V6ONLY as for a listener.
+extern fn net_udp_open(addr: const u8[:], port: i32, flags: i32) -> i32;
+// Receives up to sizes.len datagrams, the i-th into buf[i * slot..], with
+// its size into sizes[i], 0 for one cut short, and its peer into peers[i]:
+// how many, or -EAGAIN once none waits.
+extern fn net_udp_recv(fd: i32, buf: u8[:], slot: i32, sizes: i32[:], peers: UdpPeer[:]) -> i32;
+// Sends the datagrams that lie end to end in buf, sizes[i] bytes each, to
+// peers[i]; with gso, those to one peer of one size together where Linux
+// segments them (UDP_SEGMENT). How many the kernel took, in order, or
+// -EAGAIN for none, and -EINVAL or -EIO where it can't segment them.
+extern fn net_udp_send(fd: i32, buf: const u8[:], sizes: const i32[:], peers: const UdpPeer[:], gso: bool) -> i32;
 
 // A non-blocking TCP socket, or with UNIX a Unix socket's, whose connect to
 // addr and port, as net_listen takes them, has started or finished; an

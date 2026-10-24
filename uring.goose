@@ -81,13 +81,17 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     // The listeners' modes, Config.port's first.
     var h2c_at: bool[..MAX_LISTENERS + 1] = [];
     var tls_at: bool[..MAX_LISTENERS + 1] = [];
+    var h3_at: bool[..MAX_LISTENERS + 1] = [];
     for k in cfg.listeners.len + 1 {
         let h2c = if k == 0 { cfg.h2c } else { cfg.listeners[k - 1].h2c };
         let secure = if k == 0 { cfg.tls } else { cfg.listeners[k - 1].tls };
+        let h3 = if k == 0 { cfg.h3 } else { cfg.listeners[k - 1].h3 };
         // Windows, which has no sendfile, serves no TLS so far.
         guard !secure || net_sendfile(-1, -1, 0, 0) != -ENOSYS else { return Error { call: "tls", code: ENOSYS }; }
         // h2c is h2 by prior knowledge, over TCP; over TLS, ALPN chooses it.
         guard !secure || !h2c && tls_serves(tls) else { return Error { call: "tls", code: EINVAL }; }
+        guard !h3 || secure && h3_serves(tls) else { return Error { call: "h3", code: EINVAL }; }
+        h3_at.push(h3);
         h2c_at.push(h2c);
         tls_at.push(secure);
     }
@@ -128,7 +132,22 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         return opened;
     }
     let waiting = box.handle.slot >= 0;
-    if waiting { ring_bind(r, RING_SOCKET); }
+    if waiting || h3_serves(tls) { ring_bind(r, RING_SOCKET); }
+    // HTTP/3's UDP sockets are armed on the ring (net_arm), which the
+    // emulated ring can't do: ENOSYS there.
+    if h3_serves(tls) {
+        for k in lfds.len {
+            if !h3_at[k] { continue; }
+            let opened3 = h3_listen(tls, cfg, k, if k == 0 { cfg.port } else { cfg.listeners[k - 1].port });
+            guard opened3.code == 0 else {
+                h3_end(tls, H);
+                close_listeners();
+                ring_destroy(r);
+                close_waiting(box, waker);
+                return opened3;
+            }
+        }
+    }
     var timers = timer_table(if waiting { cfg.max_waiting } else { 0 });
     // Exchanges owed TIMEOUT for want of a timer, by their keys.
     var overdue: u64[>..] = [];
@@ -665,6 +684,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         stop_accepting();
         close_listeners();
         for k in lfds.len { lfds[k] = -1; }
+        if h3_serves(tls) { h3_stop(tls, now); }
         for i in conns.len {
             let c .= conns[i];
             // An h2c connection sends GOAWAY, and closes once its streams end.
@@ -685,7 +705,9 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             // A wait ends within a second, for the sweep and a stopped
             // accept's retry, or at the next timer; the waker ends it for
             // mail and a stop.
-            let n = ring_wait(r, done, if overdue.len > 0 { 0 } else { wait_for(timers, now) });
+            var timeout: i32 = if overdue.len > 0 { 0 } else { wait_for(timers, now) };
+            if h3_serves(tls) { timeout = h3_wait(tls, now, timeout); }
+            let n = ring_wait(r, done, timeout);
             if n == -EINTR { continue; }
             guard n >= 0 else { return Error { call: "wait", code: -n }; }
             now = net_clock_ms();
@@ -712,6 +734,13 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                     // the connections' path.
                     if cq.tag == RING_SOCKET {
                         let key = ring_socket(r, cq.buf);
+                        if h3_serves(tls) {
+                            let hk = h3_listener(tls, key);
+                            if hk >= 0 {
+                                h3_ready(tls, hk, cfg, fresh, common, now, H);
+                                continue;
+                            }
+                        }
                         if key != 0 { delivered(key, SOCKET_READY, ""); }
                         continue;
                     }
@@ -724,6 +753,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 let ok = if cq.send { sent(c, cq.res) } else { received(c, cq) };
                 if ok { touch(c); } else { close_conn(i); }
             }
+            if h3_serves(tls) { h3_tick(tls, cfg, fresh, common, now, H); }
             if waiting { expire(timers, now) { key => timed_out(key, true); }; }
             // With or without a box: without one, every later is owed its TIMEOUT.
             let owed = overdue.len;
@@ -741,7 +771,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 }
             }
             if !stopping && stops() != started { begin_stop(); }
-            if stopping && (open == 0 || now >= stop_by) { return Error { call: "", code: 0 }; }
+            if stopping && (open == 0 && h3_count(tls) == 0 || now >= stop_by) { return Error { call: "", code: 0 }; }
         }
     }
 
@@ -762,6 +792,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             net_close(c.fd);
         }
     }
+    if h3_serves(tls) { h3_end(tls, H); }
     close_listeners();
     // Submits the closes still queued, then frees the ring, and after it the
     // waker, which io_uring's poll of it holds until then.

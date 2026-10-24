@@ -134,6 +134,12 @@ port + 363 (`H2_PORT`, 8443 beside 8080).
 5. `scripts/test-examples.sh`: builds the examples and requests their routes on port 8080,
    including the device example with simulated hardware. ARM builds are checked
    separately ([below](#arm-under-docker)).
+6. With `H3=1`, `scripts/test-h3.sh`, which needs Docker: it builds `examples/h3`,
+   serves `test/fixtures/static/` with it, and runs `scripts/h3_client.py` against it
+   with aioquic 1.7.0, a QUIC and TLS of its own, in a `python:3.12-slim` container:
+   every route, and each file as identity, br, and gzip, byte for byte. On epoll, and
+   on Linux on io_uring too. On Docker Desktop the container reaches the host's server
+   as `host.docker.internal`.
 
 ```sh
 scripts/test.sh

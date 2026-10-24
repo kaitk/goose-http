@@ -346,6 +346,53 @@ byte TLS makes through the ring, in order with the connection's other sends:
 The handshake and the record layer run in user space on every platform: kTLS is
 retired ([decisions](decisions.md#no-ktls)).
 
+## HTTP/3
+
+A listener with `h3` serves HTTP/3 over QUIC on a UDP socket on its port, from the
+optional module `http.h3` (`h3.goose`), over goose-tls's QUIC mode
+([decisions](decisions.md#http3-is-an-optional-module-over-quic-in-goose)). Two
+modules beneath it work on bytes alone, as h2's do: `http.quic` (`quic.goose`)
+reads and writes QUIC's variable-length integers, packet headers, ACK frames, frames
+the server writes, and transport parameters; `http.qpack` (`qpack.goose`) is QPACK
+with the static table only, HPACK's integers and Huffman code under it.
+
+The loops take the TLS and the HTTP/3 servers as one value, an `H3Pair`, in place of
+the `TlsServer`, so a loop without h3 is the loop it was: its hooks for h3 are a
+`NoTls`'s or a `TlsServer`'s, which do nothing, behind a constant `h3_serves`. With
+h3, each listener's UDP socket is armed for readiness with `net_arm`, as an outbound
+socket's is: on epoll an `EPOLLONESHOT` watch, on io_uring a one-shot poll. When it
+fires, `h3_ready` takes up to 32 datagrams a call with `recvmmsg`, up to eight calls,
+then arms it again; the loop's wait ends at the next QUIC timer (`h3_wait`), and
+`h3_tick` runs the timers due.
+
+Two layers:
+
+- **The QUIC transport** keeps each worker's connections, streams, sent packets, and
+  the bytes they send and receive in pools that are the worker's globals: a worker
+  copies a program's globals, which may then hold no references, so a stream's bytes
+  are a run of the worker's byte pool by its place, not a slice. A connection is found
+  by the 8-byte Connection ID this side gave it, or by the client's first one until
+  the client uses it. Its packets go through goose-tls, which removes and applies
+  header protection and opens and seals each packet in place. ACKs, loss detection,
+  the PTO, and NewReno are RFC 9002's, each connection's timer in a heap. A flush
+  lays packets out in datagrams of at most 1,200 bytes, ACK first, then frames this
+  side owes, then CRYPTO, then the streams' data in turn, within the congestion window
+  and, before the client's address is validated, three times what it sent; it seals
+  them, records each packet's frames to send again if it's lost, and queues the
+  datagrams, which go out together with `sendmmsg`.
+- **HTTP/3** reads what each stream received: a request's HEADERS through QPACK into a
+  `Request`, its DATA as the body, and the client's control and QPACK streams. It
+  calls the handler as h2 does, a stream per exchange, and turns its HTTP/1.1
+  response into HEADERS, through QPACK, and DATA frames on the stream. A response
+  begun with `begin` gets `MORE` while its stream has less than 128 KB unsent. This
+  side's control stream carries its SETTINGS, and GOAWAY when the worker stops or a
+  handler ends its connection.
+
+A request stream closes once its request is read, or stopped, and its response's end
+is acknowledged, or reset; the client gets back its credit for streams as half of it
+is spent. A connection idle for 30 seconds, or done closing, goes at its next timer,
+after `CLOSED` to each exchange owed one.
+
 ## Mail between threads
 
 A handler that waits for another thread calls `http::later`, which needs a time limit

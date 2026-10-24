@@ -5,7 +5,7 @@
 // which doesn't map it.
 import http from "../";
 import compress from "github.com/kaitk/goose-compress@v0.1.4";
-import tls from "github.com/kaitk/goose-tls@v0.0.5";
+import tls from "../../goose-tls-quic";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import app;
 import https;

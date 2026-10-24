@@ -9,7 +9,9 @@
 # scripts/test-h2spec.sh against each loop but iocp where h2spec has a binary,
 # and with AUTOBAHN=1, scripts/test-autobahn.sh against each build, which
 # needs Docker, then scripts/test-echo.sh, and scripts/test-examples.sh, which builds each
-# example and requests each of its routes on port 8080.
+# example and requests each of its routes on port 8080, and with H3=1,
+# scripts/test-h3.sh, which needs Docker too, on epoll, and on Linux on
+# io_uring.
 #
 # The loops are uring and epoll on Linux and macOS, where the uring build is
 # also tested over the emulation on epoll it falls back to (LOOP=uring-epoll)
@@ -116,6 +118,15 @@ step "test-echo.sh"
 
 step "test-examples.sh"
 "$root/scripts/test-examples.sh"
+
+if [ "${H3:-}" = 1 ]; then
+    step "test-h3.sh, epoll loop"
+    LOOP=epoll "$root/scripts/test-h3.sh"
+    if [ "$os" = Linux ]; then
+        step "test-h3.sh, uring loop"
+        LOOP=uring "$root/scripts/test-h3.sh"
+    fi
+fi
 
 echo
 echo "test.sh: all passed"

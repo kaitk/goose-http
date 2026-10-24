@@ -22,7 +22,7 @@
 namespace http;
 
 import std;
-import tls from "github.com/kaitk/goose-tls@v0.0.5";
+import tls from "../goose-tls-quic";
 import sys;
 import message;
 import socket;

@@ -315,6 +315,26 @@ int32_t net_port(int32_t fd) {
     return -97;
 }
 
+/* UDP, for QUIC: not on Windows yet, where serve fails on an h3 listener. */
+typedef struct { int32_t len; uint8_t addr[28]; } net_udp_peer;
+typedef struct { net_udp_peer *data; int64_t len; } net_udp_peers;
+typedef struct { int32_t *data; int64_t len; } net_i32s;
+
+int32_t net_udp_open(net_bytes addr, int32_t port, int32_t flags) {
+    (void)addr, (void)port, (void)flags;
+    return -38;
+}
+
+int32_t net_udp_recv(int32_t fd, net_bytes buf, int32_t slot, net_i32s sizes, net_udp_peers peers) {
+    (void)fd, (void)buf, (void)slot, (void)sizes, (void)peers;
+    return -38;
+}
+
+int32_t net_udp_send(int32_t fd, net_bytes buf, net_i32s sizes, net_udp_peers peers, uint8_t gso) {
+    (void)fd, (void)buf, (void)sizes, (void)peers, (void)gso;
+    return -38;
+}
+
 /* A non-blocking socket connecting to what addr and port name, as shim/net.c's:
    no Unix socket (EAFNOSUPPORT), and no empty addr, which names no peer. */
 int32_t net_connect(net_bytes addr, int32_t port, int32_t flags) {

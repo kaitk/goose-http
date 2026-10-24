@@ -1068,6 +1068,42 @@ refuse at the upgrade, which needs a field in `WebSocket` to keep an admitted
 connection's promise when its run empties, and which no program here uses; and raising
 the default budget, which only moves the cap.
 
+## HTTP/3 is an optional module, over QUIC in Goose
+
+Decided 2026-10-24, task 066.
+
+HTTP/3 costs more CPU per request than h2, so a program has it only where it asks:
+the module `http.h3`, and `Listener.h3` (`Config.h3` for `Config.port`'s) on a TLS
+listener, which serves h3 on a UDP socket on the same port. goose-http adds no
+`Alt-Svc`; a program that wants browsers to find h3 sends it. A program without the
+module builds as it did, and its loops' hooks for h3 are empty.
+
+- **QUIC is written in Goose, here**: packets, frames, streams, flow control, and
+  RFC 9002's loss recovery and NewReno, with HTTP/3 and QPACK with the static table
+  only. goose-tls's TLS 1.3 server in Goose runs QUIC's handshake in a mode of its
+  own, and does the packet protection in its C over libcrypto, where its secrets stay
+  (goose-tls's decisions).
+- **`Listener.h3` is a flag, beside `h2c` and `tls`.** [ALPN chooses h2 over
+  TLS](#alpn-chooses-h2-over-tls) rejected a `Listener.h2` flag because ALPN picks
+  between h1 and h2 on a socket the client has reached; h3 is another socket, which
+  the client reaches before any ALPN, and the flag gives one listener h3 and another
+  none from one context, as HttpArena's entries need 8443 to have it and 8081 not. The
+  context's ALPN list must still offer `h3`.
+- **The loops take the TLS and HTTP/3 servers as one value**, `H3Pair`, through the
+  generic parameter that takes a `TlsServer`, so the loops' code for h3 is behind a
+  constant `h3_serves` and costs a program without it nothing.
+- **The transport's state is the worker's globals**, its byte runs by place: a
+  `Goose` worker copies globals, which may hold no references (spec §11.2), and
+  scratch the layers clear is each call's locals, since a global that shrank could
+  leave a reference the layers were handed dangling (§5.1).
+
+Rejected: ngtcp2 and nghttp3 through C, as Aegon uses them. They would bring a QUIC
+in C for what Goose can do, and a second TLS handshake beside goose-tls's, and
+HttpArena's board (`d9438f6`, 2026-10-23) shows them no faster: Aegon's 2.98 M
+requests per second on baseline-h3 behind zix's 9.09 M and agensio's 8.63 M, each with a
+QUIC of its own. And ALPN alone turning h3 on, which opens UDP on every TLS listener of
+a context.
+
 ## Not yet decided
 
 ### Compression in an optional module
