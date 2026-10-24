@@ -1070,7 +1070,7 @@ the default budget, which only moves the cap.
 
 ## HTTP/3 is an optional module, over QUIC in Goose
 
-Decided 2026-10-24, task 066.
+Decided 2026-10-24, task 067.
 
 HTTP/3 costs more CPU per request than h2, so a program has it only where it asks:
 the module `http.h3`, and `Listener.h3` (`Config.h3` for `Config.port`'s) on a TLS

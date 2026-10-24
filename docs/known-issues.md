@@ -38,6 +38,26 @@ response behind them. `scripts/test-http.sh` ignores wrk's timeouts for that rea
   directory under `build/test/` failed from a checkout under `/mnt/c` (2026-10-19).
 - Docker Desktop's host network is the Docker VM's, not WSL's loopback. HttpArena's
   readiness probes and cgroup reads use helper containers; published ports reach WSL.
+  A container on the host network reaches a server in WSL at WSL's own address
+  (`hostname -I`), not `127.0.0.1`, so `scripts/test-h3.sh` aims its client there
+  (2026-10-24).
+- The distribution's and Docker Desktop's virtual disks (`ext4.vhdx`,
+  `docker_data.vhdx`) live on the Windows drive and only grow: what's deleted inside
+  them frees nothing on Windows. Builds feed both. Each HttpArena run rebuilds entry
+  images into Docker's build cache, and Goose keeps every program it builds under
+  `~/.goose/build/prog`. On 2026-10-24 the drive filled: Docker's storage turned
+  read-only during a build, and at the next start Docker Desktop took its
+  still-attached data disk for an empty one and tried to format it. Prune after a
+  benchmark session (`docker builder prune -af`, and `~/.goose/build/prog` folders
+  older than a few days). After a large cleanup, quit Docker Desktop, run
+  `wsl --shutdown`, and compact each disk with `diskpart`'s `compact vdisk`, as
+  administrator. diskpart can't compact a sparse disk, and a sparse one
+  (`wsl --manage --set-sparse`) makes Windows allocate as the guest writes, which
+  costs writes during a run. If Docker's storage turns read-only, free space on the
+  drive and run `wsl --shutdown` before starting Docker Desktop again.
+- A file in WSL edited from Windows through `\\wsl.localhost` loses its execute bit,
+  because the editor replaces the file. `git diff` shows the mode change; restore it
+  with `chmod +x` (2026-10-24).
 
 ### WSL from a Windows shell
 
