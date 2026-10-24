@@ -42,9 +42,15 @@ done
 sleep 0.2
 
 # Docker Desktop reaches the host by name; Linux's containers share its
-# network.
+# network. Under Docker Desktop on WSL, the host network is the Docker VM's,
+# not WSL's, so its containers reach WSL at WSL's own address.
 case $(uname -s) in
-Linux) net=--network=host host=127.0.0.1 ;;
+Linux)
+    net=--network=host host=127.0.0.1
+    if docker info --format '{{.OperatingSystem}}' | grep -q 'Docker Desktop'; then
+        host=$(hostname -I | cut -d' ' -f1)
+    fi
+    ;;
 *) net= host=host.docker.internal ;;
 esac
 # shellcheck disable=SC2086 # net is one argument or none
