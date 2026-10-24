@@ -14,6 +14,11 @@ Changed:
   writing every cell at open, and a box's table of live keys is left as `calloc`
   zeroed it. A worker with `max_waiting` at `max_conns`, 16,384, held about 0.8 MiB
   before its first wait; now it holds what its waits use.
+- `Config.ring_buffers` is 64, down from 256: io_uring writes every provided buffer
+  in turn, so each worker held 1 MiB of them at any load, and 64 serve as fast on
+  Linux ([decisions](docs/decisions.md#64-provided-buffers-a-ring)). On Windows, IOCP
+  serves 1 to 7% fewer requests a second with 64; a program there that wants them
+  back sets `ring_buffers: 256`.
 
 ## v0.5.8 (2026-10-23)
 

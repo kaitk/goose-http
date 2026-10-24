@@ -120,11 +120,12 @@ struct Config {
     // serve's ring: its submission entries, and its provided buffers, which
     // the kernel fills in turn, a power of two of them. A receive that finds
     // none left ends its multishot request, which the loop queues again. The
-    // loop gives each buffer back in the pass that takes it, and 256, a
-    // wait's batch, served as fast as 1,024, with half the peak RSS (task
-    // 005).
+    // loop gives each buffer back in the pass that takes it. io_uring takes
+    // the buffers in ring order, so a worker commits every one of them
+    // whatever its load; 64 served as fast as 256 and 1,024 (tasks 005 and
+    // 065).
     ring_entries: i32 = 4096,
-    ring_buffers: i32 = 256,
+    ring_buffers: i32 = 64,
     ring_buffer_size: i32 = 4096,
     // On Linux, serve's ring is the emulation over epoll it falls back to
     // where io_uring_setup fails, as in Docker's default seccomp profile: for

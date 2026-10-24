@@ -1003,6 +1003,37 @@ deadlines, which would read two clocks a pass to save 17 ns; and nanosecond wait
 (`epoll_pwait2`, as viltrum v1.5.1 uses), which help only deadlines finer than a
 millisecond, and `later` takes milliseconds.
 
+## 64 provided buffers a ring
+
+Decided 2026-10-24, task 065. Replaces task 005's 256.
+
+io_uring takes a ring's provided buffers in ring order, and the loop gives each back at
+the tail, so every buffer is written within a few hundred receives: a worker commits
+`ring_buffers` × `ring_buffer_size` whatever its connections, 1 MiB at 256. At
+HttpArena's 64 workers that was 64 MiB of a server's memory at any load.
+
+Measured on the machine of the entry above, goose-http's server at 256, 128, and 64
+buffers, otherwise the same build:
+
+- `bench/count.sh`, one worker, 10 million plaintext requests, two rounds: 1,924.6
+  user instructions a request for each, and 472 to 484 cycles, within the rounds'
+  spread.
+- `bench/run.sh`, plaintext pipelined 16 deep at 256, 1,024, and 4,096 connections and
+  JSON at 1,024, 1 and 4 workers, one 5 s run each: every cell at 64 within 0.99 to 1.04
+  times 256's rate, but JSON at 1 worker, 1.11. Peak RSS fell by 0.4 MiB a worker at 4
+  workers and by 1.3 to 1.4 MiB at 1.
+
+The cost is on Windows. IOCP and the emulated ring keep their free buffers on a stack,
+so they commit only the buffers in use, and IOCP keeps a receive posted into a buffer
+only while more than half are free (task 017). With 64, more receives take its
+zero-byte path: oha, 1,000,000 plaintext requests at 256 connections, three
+alternating rounds, served 74,446 to 75,459 a second at 1 worker against 256's 79,100
+to 81,059, and 217,723 to 221,202 at 4 workers against 222,543 to 226,265.
+
+Rejected: a default for each platform, 64 on io_uring and 256 elsewhere, which adds a
+platform rule to `Config` for a loop that serves development, not production; a
+program on Windows that wants the rate sets `ring_buffers` itself.
+
 ## Not yet decided
 
 ### Compression in an optional module

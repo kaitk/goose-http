@@ -58,20 +58,24 @@ there Plod's gap was waiting, not work.
 - `net_clock_ms` reads `CLOCK_MONOTONIC` on Linux and `CLOCK_MONOTONIC_RAW` on macOS
   ([decision](../docs/decisions.md#timers-fall-due-by-the-precise-monotonic-clock)).
 
+- `Config.ring_buffers` is 64
+  ([decision](../docs/decisions.md#64-provided-buffers-a-ring), with the
+  measurements: the same instructions a request and rate on Linux, less memory, and
+  1 to 7% less rate on IOCP).
+
+Plod's task 061 has HttpArena's profiles before and after the timer and clock changes,
+beside viltrum, on 4 workers (2026-10-24): async 10% faster, its median from 57 to 37
+ms, and 2 to 5 MiB less on every profile.
+
 ## Still to do
 
-- The provided buffers: 64 and 128 against 256, with `bench/count.sh` and
-  `bench/run.sh`'s pipelined cells, as task 016 asks before the default changes. A
-  first check, in Plod's entry with 64 buffers and the smaller tables, served
-  `/pipeline` 16 deep at 8.05-8.10M req/s against 8.07-8.10M, three alternating
-  rounds, at 13.1 MiB against 28.4 MiB.
-- The ring's 4,096 submission entries, measured the same way.
-- HttpArena's async and a low-connection profile, before and after, with viltrum,
-  through Plod's `bench/httparena.sh`.
+- The ring's 4,096 submission entries, 260 KiB a worker, measured as the buffers
+  were.
 
 ## Acceptance criteria
 
-- [ ] The branch's tests pass on Linux (`scripts/test.sh`), and it is on `main`
+- [x] The branch's tests pass on Linux (`scripts/test.sh`), and it is on `main`
+      (`dd23d5b2`, 2026-10-24)
 - [ ] `bench/count.sh` shows no instruction cost per request from the precise clock
 - [ ] The provided buffers' and ring entries' defaults changed or kept, with the
       measurements

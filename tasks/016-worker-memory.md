@@ -112,8 +112,8 @@ working set was 8,468 KB; its rate isn't measured yet.
   `0bdbd18` keeps them off each data stack's first 2 MB. The package doesn't set
   `PR_SET_THP_DISABLE` (decided 2026-10-12): it would apply to the whole program, the
   program's own memory included.
-- The provided buffers: 1 MB a worker. Fewer would cost a re-armed receive when they
-  run out; measure before changing the default.
+- Done in task 065 (2026-10-24): 64 provided buffers, 256 KiB a worker, measured at
+  the same rate on Linux.
 - The table after the streaming tests.
 
 ### The maintainer's remark
