@@ -210,14 +210,55 @@ fn qpack_status_index(status: i32) -> i64 {
 // The static table's entry for name and value, and the first for name
 // alone; -1 for none.
 fn qpack_find(name: const u8[:], value: const u8[:]) -> i64, i64 {
-    var named = -1;
-    for e, i in QPACK_STATIC {
-        if e.name == name {
-            if e.value == value { return i, i; }
-            if named < 0 { named = i; }
+    var at = hpack_name_hash(name);
+    var k: i64 = 0;
+    loop {
+        k = QPACK_NAMES[at];
+        guard k > 0 else { return -1, -1; }
+        if QPACK_STATIC[k - 1].name == name { break; }
+        at = (at + 1) % HPACK_NAME_SLOTS;
+    }
+    let named = k - 1;
+    var i = named;
+    loop {
+        if QPACK_STATIC[i].value == value { return i, named; }
+        let n: i64 = QPACK_NEXT[i];
+        guard n > 0 else { return -1, named; }
+        i = n - 1;
+    }
+}
+
+// Each name's first entry, plus one, in slots by hpack_name_hash; and each
+// entry's next with the same name, plus one, or 0: a name's entries aren't
+// next to each other in QPACK's table, as they are in HPACK's.
+let QPACK_NAMES = qpack_names();
+let QPACK_NEXT = qpack_next();
+
+fn qpack_names() -> u8[HPACK_NAME_SLOTS] {
+    var slots: u8[HPACK_NAME_SLOTS] = [0; HPACK_NAME_SLOTS];
+    for k in QPACK_STATIC_COUNT {
+        var at = hpack_name_hash(QPACK_STATIC[k].name);
+        var seen = false;
+        while slots[at] != 0 {
+            if QPACK_STATIC[slots[at] - 1].name == QPACK_STATIC[k].name { seen = true; }
+            at = (at + 1) % HPACK_NAME_SLOTS;
+        }
+        if !seen { slots[at] = (k + 1) as u8; }
+    }
+    return slots;
+}
+
+fn qpack_next() -> u8[QPACK_STATIC_COUNT] {
+    var next: u8[QPACK_STATIC_COUNT] = [0; QPACK_STATIC_COUNT];
+    for k in QPACK_STATIC_COUNT {
+        for j in k + 1..QPACK_STATIC_COUNT {
+            if QPACK_STATIC[j].name == QPACK_STATIC[k].name {
+                next[k] = (j + 1) as u8;
+                break;
+            }
         }
     }
-    return -1, named;
+    return next;
 }
 
 // Appends a field line for name, lowercase, and value (§4.5): the static

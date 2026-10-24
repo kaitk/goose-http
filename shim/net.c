@@ -277,6 +277,11 @@ _Static_assert(sizeof(net_udp_peer) == 32 && sizeof(struct sockaddr_in6) <= 28, 
 #define UDP_SEGMENT 103
 #endif
 
+/* dst.len bytes of src into dst; net_copy has checked the lengths. */
+void net_move(net_bytes dst, net_bytes src) {
+    if (dst.len > 0) memmove(dst.data, src.data, (size_t)dst.len);
+}
+
 /* A non-blocking UDP socket bound to what addr, port, and flags name, as
    net_listen's do, with SO_REUSEPORT under NET_REUSEPORT, so that each
    worker has its own and the kernel keeps a peer's datagrams on one. Its

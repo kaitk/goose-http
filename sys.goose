@@ -108,6 +108,16 @@ extern fn net_udp_recv(fd: i32, buf: u8[:], slot: i32, sizes: i32[:], peers: Udp
 // segments them (UDP_SEGMENT). How many the kernel took, in order, or
 // -EAGAIN for none, and -EINVAL or -EIO where it can't segment them.
 extern fn net_udp_send(fd: i32, buf: const u8[:], sizes: const i32[:], peers: const UdpPeer[:], gso: bool) -> i32;
+// Writes src into dst with the C library's memmove; net_copy checks that
+// the lengths agree.
+extern fn net_move(dst: u8[:], src: const u8[:]);
+
+// copy_into for bytes, at memmove's speed: copy_into is a byte loop under gcc
+// (docs/goose-findings.md), which costs most of a large response's time.
+fn net_copy(dst: u8[:], src: const u8[:]) {
+    assert(dst.len == src.len);
+    net_move(dst, src);
+}
 
 // A non-blocking TCP socket, or with UNIX a Unix socket's, whose connect to
 // addr and port, as net_listen takes them, has started or finished; an

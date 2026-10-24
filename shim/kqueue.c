@@ -822,6 +822,11 @@ int32_t net_default_workers(void) {
     return n;
 }
 
+/* dst.len bytes of src into dst; net_copy has checked the lengths. */
+void net_move(net_bytes dst, net_bytes src) {
+    if (dst.len > 0) memmove(dst.data, src.data, (size_t)dst.len);
+}
+
 /* Writes the C library's text for an error code into out, cut to fit, and
    returns its length. */
 int64_t net_strerror(int64_t err, net_bytes out) {

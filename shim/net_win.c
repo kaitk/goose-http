@@ -470,6 +470,11 @@ int32_t net_default_workers(void) {
     return 0;
 }
 
+/* dst.len bytes of src into dst; net_copy has checked the lengths. */
+void net_move(net_bytes dst, net_bytes src) {
+    if (dst.len > 0) memmove(dst.data, src.data, (size_t)dst.len);
+}
+
 /* Writes the text for an error code into out, cut to fit, and returns its
    length: glibc's text for a Linux code, and Windows' own, in UTF-8, for an
    error with no Linux number. */

@@ -29,7 +29,7 @@ compilation:
 | `shim/mail.c` | all | The boxes' bounded queue, and the list of loop wakers that `http::stop` wakes |
 | `shim/store.c` | all | The store's blobs, written once at startup and read by every thread |
 
-Each is C for one of four reasons:
+Each is C for one of five reasons:
 
 - **Syscalls and kernel structures.** Goose calls C functions, not the kernel, and its
   structs are packed, so they don't match the kernel's own (`struct epoll_event` is 16
@@ -45,6 +45,11 @@ Each is C for one of four reasons:
 - **Memory every thread reads.** Goose shares only static data between threads, and
   copies every other global a worker uses when it's spawned. `shim/store.c` holds
   byte blobs a program writes once, before its workers read them.
+- **A copy into an existing slice at memmove's speed.** Goose's `copy_into` is a byte
+  loop under gcc, and only `append` copies whole runs. `net_move`, in each platform's
+  shim, is `memmove`, which `sys.goose`'s `net_copy` calls after checking the lengths;
+  HTTP/3 copies its bodies and datagrams with it
+  ([findings](goose-findings.md#copy_into-copies-a-byte-at-a-time)).
 
 A program that imports `http.websocket` also links goose-hash's C, which runs the
 handshake's SHA-1 on the CPU's SHA instructions where it has them, and goose-hash's

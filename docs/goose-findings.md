@@ -72,6 +72,38 @@ are lost as above (checked at `46356c2`).
 
 ## Feature requests
 
+### `copy_into` copies a byte at a time
+
+Found on `8511ae3` (`v2026.3`), task 067. Status: open (not reported)
+
+`copy_into(dst, src)` on `u8` slices compiles to a loop of one load and one store per
+byte under gcc -O2, and so does the same loop written out. gcc keeps it scalar because
+the slices may overlap, and its default cost model at -O2 doesn't version a loop for
+that. Only `append` reaches the runtime's `gs_memcpy`, and it can't write into an
+existing slice: a run of a pool, or a fixed buffer. HTTP/3 copies each response body
+into its stream's run, and each datagram into the send queue. On static-h3 (20 files,
+about 15 KB each compressed), those loops took 33% and 11% of the server's user
+instructions. With `memmove` in their place the server answered 31% more requests a
+second, with 58% fewer instructions each.
+
+    import std;
+    var g: u8[4096] = [0; 4096];
+    fn main() {
+        var s: u8[>..] = [];
+        for i in 100 { s.push(i as u8); }
+        copy_into(g[10..110], s);       // a byte loop in the C
+        var a: u8[>..] = [];
+        a.append(s);                    // gs_memcpy
+        print(g[50], " ", a[50]);
+    }
+
+Expected: an element-run copy for scalar elements, `gs_memmove` where the order can't
+show (the slices don't overlap, or `dst` starts at or before `src`), as the spec's
+"overlapping copies have memmove semantics" already allows.
+
+Workaround: `net_copy` in `sys.goose`, a length check before the shim's `net_move`,
+which calls `memmove`, for HTTP/3's byte copies (2026-10-24).
+
 ### `json::format_string` scans a byte at a time
 
 Found on `46356c2`, task 033. Status: open (not reported)

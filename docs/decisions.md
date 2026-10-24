@@ -1104,6 +1104,22 @@ requests per second on baseline-h3 behind zix's 9.09 M and agensio's 8.63 M, eac
 QUIC of its own. And ALPN alone turning h3 on, which opens UDP on every TLS listener of
 a context.
 
+## C where Goose blocks a measured cost, until Goose has a way
+
+Decided 2026-10-24, task 067. Amends [HTTP in Goose, syscalls in a C
+shim](#http-in-goose-syscalls-in-a-c-shim).
+
+Where Goose has no way to do something at the speed a profile shows it needs, and no
+clear Goose workaround exists, a thin C function in `shim/` does it, the gap goes in
+[findings](goose-findings.md) and to Goose's maintainer, and the C goes once a Goose
+release has the way. The first is `net_move`, `memmove` for HTTP/3's byte copies:
+static-h3 spent 44% of its user instructions in `copy_into`'s byte loops, and answered
+31% more requests a second without them. HTTP itself stays Goose.
+
+Rejected: reworking HTTP/3's buffers so its copies are `append`s, which goes against
+the globals that only grow (above) and changes the stream buffers throughout; and
+waiting for Goose, with static-h3 bound by copies meanwhile.
+
 ## Not yet decided
 
 ### Compression in an optional module

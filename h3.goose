@@ -228,7 +228,8 @@ fn run_drop(r: H3Run&) {
 
 // Moves bytes [from, from + n) of r to its front.
 fn run_shift(r: H3Run, from: i64, n: i64) {
-    for i in max(n, 0) { h3bytes[r.at + i] = h3bytes[r.at + from + i]; }
+    guard n > 0 else { return; }
+    net_copy(h3bytes[r.at..r.at + n], h3bytes[r.at + from..r.at + from + n]);
 }
 
 // Room in t for its offsets up to need: what's acknowledged goes from the
@@ -249,7 +250,7 @@ fn tx_put(t: H3Tx&, bytes: const u8[:]) {
     guard bytes.len > 0 else { return; }
     tx_room(t, t.end + bytes.len);
     let at = t.data.at + t.end - t.start;
-    copy_into(h3bytes[at..at + bytes.len], bytes);
+    net_copy(h3bytes[at..at + bytes.len], bytes);
     t.end += bytes.len;
 }
 
@@ -312,7 +313,7 @@ fn rx_put(r: H3Rx&, off: i64, bytes: const u8[:]) -> bool {
         if end - r.start > r.data.cap { run_grow(r.data, max(max(end - r.start, 2 * r.data.cap), 512)); }
     }
     let at = r.data.at + lo - r.start;
-    copy_into(h3bytes[at..at + end - lo], bytes[lo - off..]);
+    net_copy(h3bytes[at..at + end - lo], bytes[lo - off..]);
     spans_add(r.got, lo, end);
     return true;
 }
@@ -391,6 +392,8 @@ struct H3Strm {
     tx: H3Tx,
     // The handler's layer has bytes or the end to read here.
     readable: bool = false,
+    // In its connection's sending list.
+    listed: bool = false,
     // This side sent STOP_SENDING, or the client RESET_STREAM: the rest of
     // the request is dropped; and the client STOP_SENDING: the response is.
     rx_stopped: bool = false,
@@ -506,6 +509,12 @@ struct H3Conn {
     goaway_sent: bool = false,
     goaway_owed: bool = false,
     streams: i32[..512] = [],
+    // The streams made readable since the connection's last turn, so that a
+    // turn doesn't visit every stream.
+    ready: i32[..512] = [],
+    // The streams that may have bytes or their end to send, in the order
+    // they're served in turn; a packet visits these, not every stream.
+    sending: i32[..512] = [],
     turn: i64 = 0,
     // Frames owed: HANDSHAKE_DONE, MAX_DATA, MAX_STREAMS, PATH_RESPONSE, and
     // a CONNECTION_CLOSE, with its code.
@@ -515,6 +524,8 @@ struct H3Conn {
     owe_max_uni: bool = false,
     owe_path: bool = false,
     path_data: u8[8] = [0; 8],
+    // A stream owes MAX_STREAM_DATA, STOP_SENDING, or RESET_STREAM.
+    owe_streams: bool = false,
     owe_close: bool = false,
     close_app: bool = false,
     close_code: i64 = 0,
@@ -566,6 +577,14 @@ var h3stopping: bool = false;
 var h3fds: i32[..MAX_LISTENERS + 1] = [];
 // The most connections, as Config.max_conns.
 var h3max_conns: i64 = 0;
+// The last response head h3_head_block encoded, as the handler wrote it, and
+// its field section: a route's heads repeat within a second, and the
+// Huffman coding of their values is most of the encoding's cost.
+let H3_MEMO = 512;
+var h3memo_head: u8[H3_MEMO] = [0; H3_MEMO];
+var h3memo_head_len: i64 = 0;
+var h3memo_block: u8[H3_MEMO] = [0; H3_MEMO];
+var h3memo_block_len: i64 = 0;
 
 // The keys its UDP sockets are armed with, below the listeners' tags on
 // either loop; a later's key can't be one but at Config.max_conns' limit.
@@ -583,6 +602,22 @@ fn strm_alloc(ci: i64, id: i64, kind: u8) -> i64 {
     let c .= h3conns[ci];
     c.streams.push(k as i32);
     return k;
+}
+
+fn strm_owes(k: i64) { h3conns[h3strms[k].conn].owe_streams = true; }
+
+fn strm_sends(k: i64) {
+    let st .= h3strms[k];
+    guard !st.listed else { return; }
+    st.listed = true;
+    h3conns[st.conn].sending.push(k as i32);
+}
+
+fn strm_readable(ci: i64, k: i64) {
+    let st .= h3strms[k];
+    guard !st.readable else { return; }
+    st.readable = true;
+    h3conns[ci].ready.push(k as i32);
 }
 
 fn strm_find(c: const H3Conn&, id: i64) -> i64 {
@@ -606,6 +641,12 @@ fn strm_close(ci: i64, k: i64) {
     var at = 0;
     while at < c.streams.len && c.streams[at] != k { at++; }
     if at < c.streams.len { c.streams.remove_at(at); }
+    if s.listed {
+        s.listed = false;
+        at = 0;
+        while at < c.sending.len && c.sending[at] != k { at++; }
+        if at < c.sending.len { c.sending.remove_at(at); }
+    }
     h3strms.free(k);
 }
 
@@ -869,11 +910,12 @@ fn refs_lost(ci: i64, s: i64, refs: const H3Ref[:]) {
                 if !st.tx_stopped {
                     if r.len > 0 { tx_lost(st.tx, r.off, r.off + r.len); }
                     if r.fin && !st.tx.fin_acked { st.tx.fin_sent = false; }
+                    strm_sends(r.stream);
                 }
             },
-            R_MAX_STREAM_DATA => { st.owe_max = true; },
-            R_RESET => { st.owe_reset = true; },
-            R_STOP => { st.owe_stop = true; },
+            R_MAX_STREAM_DATA => { st.owe_max = true; strm_owes(r.stream); },
+            R_RESET => { st.owe_reset = true; strm_owes(r.stream); },
+            R_STOP => { st.owe_stop = true; strm_owes(r.stream); },
             _ => {},
         }
     }
@@ -1163,6 +1205,7 @@ fn h3_shaken(ci: i64, now: i64) {
     qv_put(b, settings.len);
     b.append(settings);
     tx_put(st.tx, b);
+    strm_sends(k);
 }
 
 // A STREAM frame's bytes for stream id: its stream opened as the client's
@@ -1214,7 +1257,7 @@ fn h3_stream_in(ci: i64, id: i64, off: i64, data: const u8[:], fin: bool) -> i64
         return 0;
     }
     guard rx_put(st.rx, off, data) else { return QE_FLOW_CONTROL_ERROR; }
-    st.readable = true;
+    strm_readable(ci, k);
     return 0;
 }
 
@@ -1232,6 +1275,7 @@ fn h3_consumed(ci: i64, k: i64, n: i64) {
     if st.rx.fin < 0 && st.rx.max - st.rx.read < H3_STREAM_WINDOW / 2 {
         st.rx.max = st.rx.read + H3_STREAM_WINDOW;
         st.owe_max = true;
+        c.owe_streams = true;
     }
 }
 
@@ -1304,7 +1348,8 @@ fn h3_frames(ci: i64, s: i64, b: const u8[:], now: i64) -> bool {
                 st.owe_reset = true;
                 st.reset_code = code;
                 st.tx.lost.s.clear();
-                st.readable = true;
+                strm_owes(k);
+                strm_readable(ci, k);
             }
         } else if t == QF_MAX_DATA {
             let v = qv(b, r);
@@ -1399,7 +1444,7 @@ fn h3_reset_in(ci: i64, id: i64, code: i64, final: i64) -> i64 {
     st.rx.got.s.clear();
     st.rx_stopped = true;
     st.reset_code = code;
-    st.readable = true;
+    strm_readable(ci, k);
     return 0;
 }
 
@@ -1589,7 +1634,7 @@ fn h3_tx_begin(k: i64, peer: const UdpPeer&) -> bool {
 // Queues datagram dg, at most H3_DATAGRAM bytes, for peer, once
 // h3_tx_begin made room.
 fn h3_tx_end(k: i64, peer: const UdpPeer&, dg: const u8[:]) {
-    copy_into(h3q[h3q_len..h3q_len + dg.len], dg);
+    net_copy(h3q[h3q_len..h3q_len + dg.len], dg);
     h3q_len += dg.len;
     h3tx_sizes[h3tx_count] = dg.len as i32;
     h3tx_peers[h3tx_count] = peer;
@@ -1741,26 +1786,32 @@ fn h3_packet_out(h3tx: u8[>..]&, h3refs_now: H3Ref[>..]&, ci: i64, s: i64, room:
             quic_write_frame1(h3tx, QF_RETIRE_CONNECTION_ID, c.owe_retire);
             c.owe_retire = -1;
         }
-        for k in c.streams {
-            let st .= h3strms[k];
-            if h3tx.len >= eliciting_end - 32 { break; }
-            if st.owe_max {
-                quic_write_frame2(h3tx, QF_MAX_STREAM_DATA, st.id, st.rx.max);
-                h3_ref(h3refs_now,R_MAX_STREAM_DATA, k, st.gen, 0, 0, false);
-                st.owe_max = false;
-            }
-            if st.owe_stop {
-                quic_write_frame2(h3tx, QF_STOP_SENDING, st.id, st.stop_code);
-                h3_ref(h3refs_now,R_STOP, k, st.gen, 0, 0, false);
-                st.owe_stop = false;
-            }
-            if st.owe_reset {
-                h3tx.push(QF_RESET_STREAM);
-                qv_put(h3tx, st.id);
-                qv_put(h3tx, st.reset_code);
-                qv_put(h3tx, st.tx.next);
-                h3_ref(h3refs_now,R_RESET, k, st.gen, 0, 0, false);
-                st.owe_reset = false;
+        if c.owe_streams {
+            c.owe_streams = false;
+            for k in c.streams {
+                let st .= h3strms[k];
+                if h3tx.len >= eliciting_end - 32 {
+                    c.owe_streams = true;
+                    break;
+                }
+                if st.owe_max {
+                    quic_write_frame2(h3tx, QF_MAX_STREAM_DATA, st.id, st.rx.max);
+                    h3_ref(h3refs_now,R_MAX_STREAM_DATA, k, st.gen, 0, 0, false);
+                    st.owe_max = false;
+                }
+                if st.owe_stop {
+                    quic_write_frame2(h3tx, QF_STOP_SENDING, st.id, st.stop_code);
+                    h3_ref(h3refs_now,R_STOP, k, st.gen, 0, 0, false);
+                    st.owe_stop = false;
+                }
+                if st.owe_reset {
+                    h3tx.push(QF_RESET_STREAM);
+                    qv_put(h3tx, st.id);
+                    qv_put(h3tx, st.reset_code);
+                    qv_put(h3tx, st.tx.next);
+                    h3_ref(h3refs_now,R_RESET, k, st.gen, 0, 0, false);
+                    st.owe_reset = false;
+                }
             }
         }
     }
@@ -1770,18 +1821,40 @@ fn h3_packet_out(h3tx: u8[>..]&, h3refs_now: H3Ref[>..]&, ci: i64, s: i64, room:
     }
     // The streams' data, each in turn.
     if s == 2 && c.shaken {
-        let n = c.streams.len;
+        let n = c.sending.len;
         var j = 0;
+        var done = false;
         while j < n && h3tx.len < eliciting_end - 16 {
-            let k: i64 = c.streams[(c.turn + j) % n];
+            let k: i64 = c.sending[(c.turn + j) % n];
             j++;
             let st .= h3strms[k];
-            if st.tx_stopped || !tx_pending(st.tx) { continue; }
+            if st.tx_stopped || !tx_pending(st.tx) {
+                done = true;
+                continue;
+            }
             let fresh, wrote = h3_data_frames(h3tx, h3refs_now, st.tx, st.id, k, st.gen, eliciting_end,
                                               c.tx_max - c.tx_total);
             c.tx_total += fresh;
+            if !tx_pending(st.tx) { done = true; }
         }
         if n > 0 { c.turn = (c.turn + 1) % n; }
+        // Those with nothing left to send leave the list, once one is seen:
+        // a stream stops having bytes to send only here, or when it stops,
+        // which a later turn sees.
+        if done {
+            var w = 0;
+            for i in n {
+                let k: i64 = c.sending[i];
+                let st .= h3strms[k];
+                if !st.tx_stopped && tx_pending(st.tx) {
+                    c.sending[w] = k as i32;
+                    w++;
+                } else {
+                    st.listed = false;
+                }
+            }
+            while c.sending.len > w { c.sending.pop(); }
+        }
     }
     var eliciting = h3tx.len > ack_end;
     if !eliciting && sp.probes > 0 && h3tx.len < end {
@@ -2039,6 +2112,15 @@ fn h3_head_block(fb: u8[>..]&, text: u8[:]) -> i64 {
         start = at;
     }
     let size = at;
+    let memo = size <= H3_MEMO;
+    if memo && size == h3memo_head_len && text[..size] == h3memo_head[..size] {
+        fb.append(h3memo_block[..h3memo_block_len]);
+        return size;
+    }
+    // Before the names are lowercased in text.
+    if memo { net_copy(h3memo_head[..size], text[..size]); }
+    h3memo_head_len = 0;
+    let base = fb.len;
     qpack_begin(fb);
     let line = if line_end > 0 { text[..line_end] } else { text[..0] };
     var status: i32 = 500;
@@ -2062,6 +2144,12 @@ fn h3_head_block(fb: u8[>..]&, text: u8[:]) -> i64 {
            name == "transfer-encoding" || name == "upgrade" { continue; }
         qpack_encode(fb, name, trim(l[colon + 1..]));
     }
+    let n = fb.len - base;
+    if memo && n <= H3_MEMO {
+        net_copy(h3memo_block[..n], fb[base..]);
+        h3memo_block_len = n;
+        h3memo_head_len = size;
+    }
     return size;
 }
 
@@ -2072,6 +2160,7 @@ fn h3_queue_frame(k: i64, kind: i64, payload: const u8[:]) {
     qv_put(head, payload.len);
     tx_put(h3strms[k].tx, head);
     tx_put(h3strms[k].tx, payload);
+    strm_sends(k);
 }
 
 // Queues HEADERS for the HTTP/1.1 head at text's front, and DATA for what
@@ -2096,7 +2185,7 @@ fn h3_emit<S>(q: H3ServerOf<S>&, k: i64, bytes: u8[:]) {
         if e.head.len > 0 {
             let had = e.head.len;
             e.head = h3bytes.realloc_slice(e.head, had + bytes.len);
-            copy_into(e.head[had..], bytes);
+            net_copy(e.head[had..], bytes);
             guard h3_emit_head(k, e.head) else { return; }
             run_free(e.head);
             e.head = h3bytes[..0];
@@ -2104,7 +2193,7 @@ fn h3_emit<S>(q: H3ServerOf<S>&, k: i64, bytes: u8[:]) {
             // begin's head, open until the first send.
             if bytes.len > 0 {
                 e.head = h3bytes.alloc_slice(bytes.len);
-                copy_into(e.head, bytes);
+                net_copy(e.head, bytes);
             }
             return;
         }
@@ -2115,6 +2204,7 @@ fn h3_emit<S>(q: H3ServerOf<S>&, k: i64, bytes: u8[:]) {
     if !e.x.stream.open {
         st.tx.fin = true;
         e.ended = true;
+        strm_sends(k);
     }
 }
 
@@ -2194,6 +2284,7 @@ fn h3_stop_request(k: i64) {
     st.rx_stopped = true;
     st.owe_stop = true;
     st.stop_code = H3_NO_ERROR;
+    strm_owes(k);
 }
 
 // Resets stream k with code: a malformed request (RFC 9114, section 4.1.2),
@@ -2212,6 +2303,7 @@ fn h3_reset<S, H>(q: H3ServerOf<S>&, k: i64, code: i64) {
         st.owe_stop = true;
         st.stop_code = code;
     }
+    strm_owes(k);
     q.ex[k].ended = true;
 }
 
@@ -2307,7 +2399,7 @@ fn h3_field_section<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, fb: const u8[:], e
         let e .= q.ex[k];
         run_free(e.trailers);
         e.trailers = h3bytes.alloc_slice(fields.len);
-        copy_into(e.trailers, fields);
+        net_copy(e.trailers, fields);
         return;
     }
     let connect = m0 >= 0 && pseudo[m0..m1] == "CONNECT";
@@ -2351,9 +2443,9 @@ fn h3_field_section<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, fb: const u8[:], e
     e.method_len = method.len;
     e.target_len = target.len;
     e.rq = h3bytes.alloc_slice(method.len + target.len + fields.len);
-    copy_into(e.rq[..method.len], method);
-    copy_into(e.rq[method.len..method.len + target.len], target);
-    copy_into(e.rq[method.len + target.len..], fields);
+    net_copy(e.rq[..method.len], method);
+    net_copy(e.rq[method.len..method.len + target.len], target);
+    net_copy(e.rq[method.len + target.len..], fields);
 }
 
 // A piece of stream k's body.
@@ -2375,7 +2467,7 @@ fn h3_body<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, piece: const u8[:], cfg: co
         if e.held.len + piece.len <= min(cfg.max_head, H3_STREAM_WINDOW / 2) {
             let had = e.held.len;
             e.held = if had == 0 { h3bytes.alloc_slice(piece.len) } else { h3bytes.realloc_slice(e.held, had + piece.len) };
-            copy_into(e.held[had..], piece);
+            net_copy(e.held[had..], piece);
             return;
         }
         // Too long to gather: REQUEST now, with what's held, and the body in
@@ -2654,45 +2746,41 @@ fn h3_finished<S>(q: H3ServerOf<S>&, k: i64) -> bool {
 fn h3_serve_conn<S, H>(q: H3ServerOf<S>&, ci: i64, cfg: const Config&, fresh: const S&,
                        common: const u8[:], now: i64) {
     let gone = Request { .. };
-    let open = h3conns[ci].streams;
-    for k in open {
+    var r = 0;
+    while r < h3conns[ci].ready.len {
         guard h3conns[ci].live && h3conns[ci].state == H3_OPEN else { return; }
+        let k: i64 = h3conns[ci].ready[r];
+        r++;
         let st .= h3strms[k];
         if st.conn != ci || !st.readable { continue; }
         st.readable = false;
         if st.kind == K_REQUEST { h3_request_in(q, ci, k, cfg, fresh, common, now, H); }
         else if st.kind != K_CONTROL_OUT { h3_uni_in(ci, k, now); }
     }
+    h3conns[ci].ready.clear();
     guard h3conns[ci].live && h3conns[ci].state == H3_OPEN else { return; }
-    let again = h3conns[ci].streams;
-    for k in again {
-        let st .= h3strms[k];
-        if st.conn != ci || st.kind != K_REQUEST || q.ex.len <= k { continue; }
-        let e .= q.ex[k];
-        if e.called && e.x.stream.open && !e.ended && !st.tx_stopped && st.tx.end - st.tx.next < H3_SEND_AHEAD &&
-           st.rx.fin >= 0 && st.rx.read >= st.rx.fin {
-            let wrote = h3_call(q, ci, k, Event { kind: MORE, req: gone, data: "", whole: false, trailers: "" },
-                                common, H);
-            let e2 .= q.ex[k];
-            // A MORE that neither sends, ends, nor waits would be called
-            // forever.
-            if !wrote && !e2.x.stream.moved && e2.x.stream.open { h3_reset(q, k, H3_INTERNAL_ERROR, H); }
-        }
-    }
-    let c .= h3conns[ci];
-    // GOAWAY, once a handler ended its connection or the worker stops
-    // (section 5.2): the streams already opened finish.
-    if (c.goaway_owed || h3stopping) && !c.goaway_sent && c.control_out >= 0 {
-        c.goaway_sent = true;
-        var b: u8[>..] = [];
-        qv_put(b, c.bidi_next * 4);
-        h3_queue_frame(c.control_out, H3F_GOAWAY, b);
-    }
-    let last = h3conns[ci].streams;
+    // MORE for each stream with room, and the streams done closed, in one
+    // pass; from the end, since strm_close takes a stream out of the list.
     var requests = 0;
-    for k in last {
+    var i = h3conns[ci].streams.len - 1;
+    while i >= 0 {
+        guard i < h3conns[ci].streams.len else { i--; continue; }
+        let k: i64 = h3conns[ci].streams[i];
+        i--;
         let st .= h3strms[k];
         if st.kind != K_REQUEST { continue; }
+        if q.ex.len > k {
+            let e .= q.ex[k];
+            if e.called && e.x.stream.open && !e.ended && !st.tx_stopped && st.tx.end - st.tx.next < H3_SEND_AHEAD &&
+               st.rx.fin >= 0 && st.rx.read >= st.rx.fin {
+                let wrote = h3_call(q, ci, k, Event { kind: MORE, req: gone, data: "", whole: false, trailers: "" },
+                                    common, H);
+                let e2 .= q.ex[k];
+                // A MORE that neither sends, ends, nor waits would be called
+                // forever.
+                if !wrote && !e2.x.stream.moved && e2.x.stream.open { h3_reset(q, k, H3_INTERNAL_ERROR, H); }
+            }
+        }
         if h3_finished(q, k) {
             if q.ex.len > k {
                 run_free(q.ex[k].rq);
@@ -2705,6 +2793,15 @@ fn h3_serve_conn<S, H>(q: H3ServerOf<S>&, ci: i64, cfg: const Config&, fresh: co
         } else {
             requests++;
         }
+    }
+    let c .= h3conns[ci];
+    // GOAWAY, once a handler ended its connection or the worker stops
+    // (section 5.2): the streams already opened finish.
+    if (c.goaway_owed || h3stopping) && !c.goaway_sent && c.control_out >= 0 {
+        c.goaway_sent = true;
+        var b: u8[>..] = [];
+        qv_put(b, c.bidi_next * 4);
+        h3_queue_frame(c.control_out, H3F_GOAWAY, b);
     }
     let c2 .= h3conns[ci];
     if c2.goaway_sent && requests == 0 && (h3stopping || c2.goaway_owed) && tx_done_or_empty(c2) {

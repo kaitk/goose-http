@@ -79,7 +79,10 @@ Several agents work in these repositories at once (2026-10-20).
   maintainer.
 - C is for what Goose can't reach: syscalls and kernel structures, behind thin functions
   in `shim/`. HTTP parsing, routing, response building, and JSON are Goose, since
-  measuring Goose is the point.
+  measuring Goose is the point. Where a profile shows Goose blocking a cost with no clear
+  Goose workaround, a thin C function may do that one thing until Goose can, with the gap
+  in `docs/goose-findings.md` ([decision](docs/decisions.md#c-where-goose-blocks-a-measured-cost-until-goose-has-a-way),
+  2026-10-24).
 
 ## Code conventions
 
