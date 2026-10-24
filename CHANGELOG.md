@@ -2,6 +2,27 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.11 (2026-10-24)
+
+Faster HTTP/3, in less memory. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`,
+and goose-compress `v0.1.4`. No breaking changes.
+
+Changed:
+
+- HTTP/3 does less work a request: QPACK's static table found by name, a response
+  head's field section kept for the next head like it, lists of each connection's
+  streams to read and to send in place of visits to all of them, and its copies by
+  `memmove`, since Goose's `copy_into` is a byte loop under gcc
+  ([findings](docs/goose-findings.md#copy_into-copies-a-byte-at-a-time)).
+- A connection with 64 KB of responses queued unsent takes no new request until they
+  go out, as a TCP server stops reading on a full socket.
+
+On HttpArena's h3 profiles over loopback, Plod's entry on 4 workers, built as its image
+builds it (`-O3 -march=native`): baseline-h3 +25% requests a second, static-h3 +11%, and
+static-h3's memory 193 to 119 MiB ([task 067](tasks/067-http3.md#tuning)). At Goose's
+default `-O2`, static-h3 gains more, +38% before the queue, since gcc doesn't vectorize
+`copy_into` there.
+
 ## v0.5.10 (2026-10-24)
 
 HTTP/3. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`, and goose-compress

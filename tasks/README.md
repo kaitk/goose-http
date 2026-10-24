@@ -74,7 +74,7 @@ goose-rest's first benchmark run on the desktop. The HTTP changes it needs are o
 | 062: io_uring's request cost | Since TLS on io_uring, plaintext `/api/me` costs +22 instructions there; explain it and remove it, or record why it stays. |
 | 063: upgraded drain credits | Unix integration and request-cost checks; native io_uring, macOS, and Windows validation remain before release. |
 | 065: a worker's floor, and timers on time | Timer tables that grow, the precise clock, and 64 provided buffers are on `main`; the ring's submission entries remain. |
-| 067: HTTP/3, off by default | Built on both Linux loops and macOS over goose-tls's task 008, and checked with h2load-h3 and aioquic; measuring on Linux, the comparisons, and the release remain. |
+| 067: HTTP/3, off by default | Done (2026-10-24): released in `v0.5.10`, tuned in `v0.5.11`; path MTU probing is the next candidate. Archive once HttpArena's board has its numbers. |
 
 Tasks 013 and 018 have completed acceptance criteria and are archived with the other
 completed work. Compression subtasks stay with their open parent. Completed platform
