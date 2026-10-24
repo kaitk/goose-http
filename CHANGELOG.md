@@ -2,7 +2,10 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
-## Unreleased
+## v0.5.9 (2026-10-24)
+
+A smaller worker, timers on time, and WebSockets up to `max_conns`. Goose `v2026.3`,
+goose-hash `v0.0.4`, goose-tls `v0.0.5`, and goose-compress `v0.1.4`.
 
 Changed:
 
