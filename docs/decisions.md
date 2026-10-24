@@ -1112,9 +1112,10 @@ shim](#http-in-goose-syscalls-in-a-c-shim).
 Where Goose has no way to do something at the speed a profile shows it needs, and no
 clear Goose workaround exists, a thin C function in `shim/` does it, the gap goes in
 [findings](goose-findings.md) and to Goose's maintainer, and the C goes once a Goose
-release has the way. The first is `net_move`, `memmove` for HTTP/3's byte copies:
-static-h3 spent 44% of its user instructions in `copy_into`'s byte loops, and answered
-31% more requests a second without them. HTTP itself stays Goose.
+release has the way. The first is `net_move`, `memmove` for HTTP/3's byte copies: at
+Goose's default `-O2`, static-h3 spent 44% of its user instructions in `copy_into`'s
+byte loops, and answered 31% more requests a second without them. At `-O3`, where gcc
+vectorizes the loop, `memmove` is still 1.3% ahead. HTTP itself stays Goose.
 
 Rejected: reworking HTTP/3's buffers so its copies are `append`s, which goes against
 the globals that only grow (above) and changes the stream buffers throughout; and
