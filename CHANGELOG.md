@@ -19,6 +19,18 @@ Changed:
   Linux ([decisions](docs/decisions.md#64-provided-buffers-a-ring)). On Windows, IOCP
   serves 1 to 7% fewer requests a second with 64; a program there that wants them
   back sets `ring_buffers: 256`.
+- A WebSocket is promised bytes of the gather budget only while it holds part of a
+  message, a message in fragments or a frame split across reads, not from its upgrade
+  on. Idle connections and messages that arrive whole cost no budget, so a worker holds
+  as many WebSockets as `max_conns` allows, where the defaults stopped it at 1,021.
+  `ws_upgrade` no longer answers 503; a message the budget can't hold closes its
+  connection with 1013 (Try Again Later)
+  ([decisions](docs/decisions.md#a-websocket-is-promised-its-bytes-while-it-holds-a-message)).
+
+Removed:
+
+- `http::ws_admit`. A program that called it before `ws_switch` drops the call; its
+  WebSockets are then promised their bytes as `ws_upgrade`'s are.
 
 ## v0.5.8 (2026-10-23)
 

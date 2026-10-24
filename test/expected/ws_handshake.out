@@ -102,11 +102,3 @@ Date: Sat, 10 Oct 2026 12:00:00 GMT
 Content-Length: 0
 
 (switched: false)
-
-HTTP/1.1 503 Service Unavailable
-Server: goose
-Date: Sat, 10 Oct 2026 12:00:00 GMT
-Retry-After: 1
-Content-Length: 0
-
-(switched: false)

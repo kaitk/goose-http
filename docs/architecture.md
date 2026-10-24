@@ -178,10 +178,12 @@ A whole-request handler gets a body that fits with its head in the read buffer. 
 longer body needs a handler with state, which can copy it whole up to a limit with
 `http::gather`, into a run of the worker's gather pool, `http::gathered`. The pool is
 a slice pool that only a program that gathers has, and each worker's has a budget, the
-bytes it may promise its runs at once. A run is promised its most at admission, a
-body's at its head and a WebSocket's at its upgrade, and refused there with 503, so a
-run admitted never fails later
+bytes it may promise its runs at once. A body's run is promised its most at its head,
+and refused there with 503, so a body admitted never fails later
 ([decision](decisions.md#the-gather-budget-counts-bytes-promised-and-refuses-at-admission)).
+A WebSocket's run is promised only while it holds part of a message, and a message
+the budget can't hold closes the connection with 1013
+([decision](decisions.md#a-websocket-is-promised-its-bytes-while-it-holds-a-message)).
 A Content-Length body's run is its exact size, placed at the head, and a chunked one
 doubles up to its limit. The budget bounds the bytes promised, not the pool's length,
 which fragmentation can take past it. A streamed response is asked for `MORE` only while its queued output
@@ -216,8 +218,7 @@ the same way.
 
 The optional `http.websocket` module speaks RFC 6455 over `http::upgrade`'s raw bytes,
 so the loops know nothing of it ([decisions](decisions.md#websocket-is-an-optional-module-over-upgrade)).
-`ws_upgrade` checks the request with `ws_check`, promises the connection its bytes
-with `ws_admit`, and writes the 101 with `ws_switch`, whose `Sec-WebSocket-Accept` is
+`ws_upgrade` checks the request with `ws_check` and writes the 101 with `ws_switch`, whose `Sec-WebSocket-Accept` is
 the base64 of the key's SHA-1 from goose-hash, computed for each connection. A program
 that doesn't import the module needs neither goose-hash nor its C.
 
@@ -229,8 +230,9 @@ split across reads, wait in one run of the worker's gather pool, held in the
 `WebSocket` in the connection's state and freed when the message is whole or the
 connection closes; an idle connection holds no buffer. A frame split across reads takes
 from the next bytes only what it lacks, so the run never holds more than the message
-and one frame: `WebSocket.limit` and 131 bytes, which `ws_admit` promised at the
-upgrade and `ws_release` gives back. A frame's head is checked
+and one frame: `WebSocket.limit` and 131 bytes, which the run is promised when it
+first holds a byte and gives back when it's empty, or `ws_release` at the close.
+A frame's head is checked
 before its payload arrives, so a frame past `WebSocket.limit` closes the connection
 with 1009 without being buffered. Text is checked as UTF-8 a fragment at a time, so bad
 text in an early fragment fails the connection before the rest arrives; within one

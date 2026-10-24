@@ -24,15 +24,10 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
 Sec-WebSocket-Protocol: chat
 
 
-HTTP/1.1 503 Service Unavailable
-Server: goose
-Date: Sat, 10 Oct 2026 12:00:00 GMT
-Content-Type: application/json
-Content-Length: 16
-
-{"error":"busy"}
 16 pipelined: 112 bytes back, open, nothing held
 16 pipelined, 13 bytes per call: 112 bytes back, open, nothing held
 fragmented, a byte per call: 9 bytes back, open, nothing held
 a frame cut short: 0 bytes back, open, a run held
 over the limit: 4 bytes back, closed, nothing held
+whole frames, no budget: 28 bytes back, open, nothing held
+fragmented, no budget: 4 bytes back, closed, nothing held

@@ -1,8 +1,8 @@
 // WebSocket's parts (websocket.goose), as a framework composes them: ws_check's
-// verdicts without an answer, a refusal in a program's own shape, ws_admit's
-// promise and the program's own 503 where the budget can't hold it, ws_switch's
+// verdicts without an answer, a refusal in a program's own shape, ws_switch's
 // 101 against ws_upgrade's, and ws_take driven with bytes alone against
-// ws_read driven with events, with ws_release for what a connection holds.
+// ws_read driven with events, with ws_release for what a connection holds,
+// and 1013 for a message the gather budget can't hold.
 import std;
 import http from "../../";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
@@ -36,20 +36,14 @@ fn respond_with<F>(minor: i32 = 1) -> u8[>..] {
     return t;
 }
 
-// A framework's answer: ws_check's refusal with a JSON body of its own, a
-// 503 of its own where ws_admit can't promise ws its bytes, or ws_switch's
-// 101.
-fn framework(req: const http::Request&, ws: http::WebSocket&, out: http::Reply) {
+// A framework's answer: ws_check's refusal with a JSON body of its own, or
+// ws_switch's 101.
+fn framework(req: const http::Request&, out: http::Reply) {
     let status, key, fields = http::ws_check(req, out.minor);
     guard status == 101 else {
         http::start(out, status);
         out.buf.append(fields);
         http::finish(out, http::JSON, "{\"error\":\"no_websocket\"}");
-        return;
-    }
-    guard http::ws_admit(ws) else {
-        http::start(out, 503);
-        http::finish(out, http::JSON, "{\"error\":\"busy\"}");
         return;
     }
     http::ws_switch(out, key, "chat");
@@ -85,7 +79,6 @@ fn echo(data: const u8[:], step: i64, bytes: bool, limit: i64 = 1 << 20) -> u8[>
     let reply = http::Reply { buf: out, common: "", keep_alive: keep, minor: 1, head: false, stream: stream };
     http::switched(reply);
     var ws = http::WebSocket { limit: limit, .. };
-    assert(http::ws_admit(ws));
     let none = http::Request { .. };
     var at = 0;
     while at < data.len {
@@ -152,13 +145,8 @@ fn main() {
     // A refusal in the program's own shape, and the 101 from the same code.
     var buf2: u8[>..] = [];
     let plain = check::request("GET", "", buf2);
-    print(respond_with() { out => framework(plain, ws, out); });
-    print(respond_with() { out => framework(ok, ws, out); });
-    http::gather_budget(0);
-    var refused = http::WebSocket { .. };
-    print(respond_with() { out => framework(ok, refused, out); });
-    http::gather_budget(http::GATHER_BUDGET);
-    http::ws_release(ws);
+    print(respond_with() { out => framework(plain, out); });
+    print(respond_with() { out => framework(ok, out); });
     assert(http::gather_promised == 0);
 
     // ws_take from bytes alone sends what ws_read sends from events.
@@ -179,4 +167,16 @@ fn main() {
     b.clear();
     frame(b, true, http::WS_TEXT, long);
     both("over the limit", b, b.len, 100);
+
+    // With the budget spent, whole frames still echo, as they hold nothing;
+    // a message in fragments, which must be held, closes with 1013.
+    http::gather_budget(0);
+    b.clear();
+    for i in 4 { frame(b, true, http::WS_TEXT, "hello"); }
+    both("whole frames, no budget", b, b.len);
+    b.clear();
+    frame(b, false, http::WS_TEXT, "hel");
+    frame(b, true, 0, "lo");
+    both("fragmented, no budget", b, b.len);
+    http::gather_budget(http::GATHER_BUDGET);
 }

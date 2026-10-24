@@ -106,7 +106,7 @@ fn talk(name: const u8[:], data: const u8[:], step: i64 = 0) {
     while at < data.len {
         let to = min(at + k, data.len);
         handle(http::Event { kind: http::BODY, req: r, data: data[at..to], whole: false, trailers: "" }, st, reply);
-        // Never more than the message and a frame, which ws_admit promised.
+        // Never more than the message and a frame, which ws.held is promised.
         assert(st.ws.held.cap <= st.ws.held.most);
         at = to;
     }

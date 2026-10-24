@@ -338,27 +338,23 @@ thread_fn worker(cfg: http::Config) {
   returns true; the connection then carries frames into `st.ws`. Otherwise it answers
   and returns false: 426 with `Upgrade: websocket` to a request that doesn't ask for
   it, 426 with `Sec-WebSocket-Version: 13` for another version, 400 for another method
-  or a `Sec-WebSocket-Key` that isn't 16 bytes in base64, 501 on an h2 stream, and 503
-  with `Retry-After: 1` where the worker's gather budget can't promise the connection
-  its bytes ([Helpers for APIs](#helpers-for-apis)), which keeps the connection open.
+  or a `Sec-WebSocket-Key` that isn't 16 bytes in base64, and 501 on an h2 stream.
   `http::ws_upgrade(req, st.ws, out, protocol)` names a subprotocol in
   `Sec-WebSocket-Protocol`: one of those the client offered, which
   `http::field_of(req, "sec-websocket-protocol")` gives.
-- A WebSocket keeps its promise while it's open, idle or not, so a worker admits the
-  budget ÷ (`limit` + 131) of them: 1,021 at the defaults. A program with many idle
-  connections on few cores, such as one sending notifications, reaches that long before
-  memory runs short, and its clients get 503. It raises the budget with
-  `http::gather_budget(bytes)` in `main`, or lowers `limit` to the longest message it
-  takes: at 4 KiB a worker admits 15,876.
-- `ws_upgrade` is three parts, for a program that answers a refusal in its own shape.
+- A WebSocket is promised bytes of the worker's gather budget
+  ([Helpers for APIs](#helpers-for-apis)) only while it holds part of a message: the
+  fragments of one, or a frame split across reads. Then it's promised `limit` and 131
+  bytes, a message nearly at the limit and a control frame not yet whole after it, and
+  gives them back once the message is whole. A frame that arrives whole holds nothing,
+  so idle connections and small messages cost no budget, and a worker holds as many
+  WebSockets as `Config.max_conns` allows. A message the budget can't hold closes its
+  connection with 1013 (Try Again Later), in a Close first.
+- `ws_upgrade` is two parts, for a program that answers a refusal in its own shape.
   `http::ws_check(req, out.minor)` answers nothing and returns the status, `ws_upgrade`'s
   101, 426, 400, or 501; for 101, the request's `Sec-WebSocket-Key`; and otherwise the
   fields the refusal must carry, whole lines ending in `\r\n`, which a 426 needs.
-  `http::ws_admit(st.ws)` promises the connection `WebSocket.limit` and 131 bytes of
-  the worker's gather pool, a message nearly at the limit and a control frame not yet
-  whole after it, or returns false where the budget can't hold them; `ws_take` holds
-  bytes only within that promise, and `ws_release` gives it back. Set the limit before
-  it. `http::ws_switch(out, key, protocol)` then writes the 101 and switches the
+  `http::ws_switch(out, key, protocol)` then writes the 101 and switches the
   connection. It leaves out a `protocol` that isn't a valid field value, where
   `ws_upgrade` answers 400; neither checks that the client offered it, which is the
   program's choice. Here in a function the handler calls:
@@ -369,11 +365,6 @@ thread_fn worker(cfg: http::Config) {
       http::start(out, status);
       out.buf.append(fields);
       http::finish(out, http::JSON, "{\"error\":\"no_websocket\"}");
-      return;
-  }
-  guard http::ws_admit(st.ws) else {
-      http::start(out, 503);
-      http::finish(out, http::JSON, "{\"error\":\"busy\"}");
       return;
   }
   http::ws_switch(out, key, "");
@@ -393,8 +384,8 @@ thread_fn worker(cfg: http::Config) {
   closes it with 1002 (unmasked, an RSV bit set, an unknown opcode, a control frame in
   fragments or longer than 125 bytes, a continuation out of place, a bad close code),
   text that isn't UTF-8 with 1007, and a message longer than `WebSocket.limit`, 64 KiB
-  by default, with 1009, each with a Close first. A frame's length is checked from its
-  head, before its payload arrives.
+  by default, with 1009, and one the gather budget can't hold with 1013, each with a
+  Close first. A frame's length is checked from its head, before its payload arrives.
 - `http::ws_send(out, op, data)` sends a message in one frame, at any event of the
   connection's, such as `WAKE` for one from another thread. Text must be UTF-8.
 - `http::after_drain(out)`, after `send` or `ws_send` on an upgraded connection, asks

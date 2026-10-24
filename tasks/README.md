@@ -73,7 +73,8 @@ goose-rest's first benchmark run on the desktop. The HTTP changes it needs are o
 | 061: h2 over TLS | Serves from both loops, chosen by ALPN; HttpArena's baseline-h2 waits for goose-tls's own server, and static-h2 is deferred. |
 | 062: io_uring's request cost | Since TLS on io_uring, plaintext `/api/me` costs +22 instructions there; explain it and remove it, or record why it stays. |
 | 063: upgraded drain credits | Unix integration and request-cost checks; native io_uring, macOS, and Windows validation remain before release. |
-| 065: a worker's floor, and timers on time | Timer tables that grow and the precise clock are built; the provided buffers' and ring entries' defaults remain, and HttpArena before and after. |
+| 065: a worker's floor, and timers on time | Timer tables that grow, the precise clock, and 64 provided buffers are on `main`; the ring's submission entries remain. |
+| 066: WebSockets a worker admits | Built: a WebSocket is promised its bytes only while it holds a message, and one the budget can't hold gets 1013. echo-ws at 16,384 connections remains to measure. |
 
 Tasks 013 and 018 have completed acceptance criteria and are archived with the other
 completed work. Compression subtasks stay with their open parent. Completed platform

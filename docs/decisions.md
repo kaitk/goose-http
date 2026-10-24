@@ -743,7 +743,8 @@ that promise, so nothing admitted fails for lack of room later.
   that doesn't fit gets 503 with `Retry-After: 1` from `ws_upgrade`, and the connection
   stays open, as no body follows. `WebSocket.limit`'s default went from 1 MiB to
   64 KiB, so the default budget admits about a thousand connections per worker rather
-  than 63.
+  than 63. Replaced on 2026-10-24 by
+  [a WebSocket is promised its bytes while it holds a message](#a-websocket-is-promised-its-bytes-while-it-holds-a-message).
 - **The parts are public**: `gather_budget`, `gather_promise`, `gather_piece`,
   `gather_clear`, `release_gather`, `gather_head`, and `ws_admit`. A framework answers a
   refusal in its own shape and keeps its own runs in the same pool, under the same
@@ -1033,6 +1034,39 @@ to 81,059, and 217,723 to 221,202 at 4 workers against 222,543 to 226,265.
 Rejected: a default for each platform, 64 on io_uring and 256 elsewhere, which adds a
 platform rule to `Config` for a loop that serves development, not production; a
 program on Windows that wants the rate sets `ring_buffers` itself.
+
+## A WebSocket is promised its bytes while it holds a message
+
+Decided 2026-10-24, task 066. Replaces, of [the gather budget counts bytes promised,
+and refuses at admission](#the-gather-budget-counts-bytes-promised-and-refuses-at-admission),
+a WebSocket admitted at its upgrade.
+
+A WebSocket's run holds bytes only for a message in fragments or a frame split across
+reads; a frame that arrives whole is read from the read buffer. Promising its limit at
+the upgrade, for the connection's life, bounded a worker's WebSockets by a worst case
+that nearly never happens at once: at the defaults, 1,021 a worker. A laptop's or
+desktop's few workers refused HttpArena's echo-ws at 16,384 connections: on 4 workers,
+1,824 messages a second, the rest of the connections refused with 503 and reconnecting
+(Plod's task 061).
+
+Now `ws_take` promises the run `limit` and 131 bytes when it first holds a byte, and
+gives the promise back when the run is empty: when the message is whole, or the split
+frame is. A message the budget can't promise closes the connection with 1013 (Try
+Again Later) in a Close, RFC 6455's code for a server that is overloaded, since after
+the upgrade there is no status to answer with. `ws_upgrade` no longer answers 503, and
+`ws_admit` is gone.
+
+Nothing admitted still fails partway through a message: the promise is the whole limit,
+taken before the message's first byte is held. What changes is where a refusal comes:
+at a message rather than at the upgrade, so a client that sends a long message in
+fragments while the worker's budget is spent is closed then, where before it would have
+been refused at its upgrade. That is the trade the earlier decision rejected for a
+body, whose refusal partway has no answer; a WebSocket's has 1013.
+
+Rejected: keeping `ws_admit` beside the new default, for a program that would rather
+refuse at the upgrade, which needs a field in `WebSocket` to keep an admitted
+connection's promise when its run empties, and which no program here uses; and raising
+the default budget, which only moves the cap.
 
 ## Not yet decided
 
