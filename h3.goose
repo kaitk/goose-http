@@ -44,10 +44,19 @@ import epoll;
 import uring;
 import mail;
 
-// The Connection IDs this side issues, and the largest datagram it sends:
-// QUIC's smallest, which every path carries (RFC 9000, section 14).
+// The Connection IDs this side issues, and the largest datagram it sends
+// until a probe shows the path carries more: QUIC's smallest, which every
+// path carries (RFC 9000, section 14).
 let H3_CID_LEN = 8;
 let H3_DATAGRAM = 1200;
+// The datagram a connection probes for once its handshake is confirmed (RFC
+// 8899's DPLPMTUD, one step): a 1,500-byte MTU's, under IPv6's header, or
+// less where the client's max_udp_payload_size says so. A lost probe is
+// tried again, H3_PROBE_TRIES times in all, then again after
+// H3_PROBE_AGAIN_MS, RFC 8899's PMTU_RAISE_TIMER.
+let H3_DATAGRAM_MAX = 1452;
+let H3_PROBE_TRIES = 3;
+let H3_PROBE_AGAIN_MS = 600000;
 // A datagram's room in the receive buffer, the datagrams taken per receive,
 // and the datagrams a worker queues before it sends them.
 let H3_SLOT = 2048;
@@ -364,6 +373,8 @@ struct H3Sent {
     size: i64,
     eliciting: bool,
     in_flight: bool,
+    // A path MTU probe, whose loss isn't congestion (RFC 9000, section 14.4).
+    probe: bool = false,
     // Its frames, h3refs[refs_at..refs_at + refs_n].
     refs_at: i64 = 0,
     refs_n: i64 = 0,
@@ -486,6 +497,12 @@ struct H3Conn {
     ssthresh: i64 = 0x7fffffffffffffff,
     in_flight: i64 = 0,
     recovery_start: i64 = -1,
+    // The largest datagram it sends, and its path MTU probe: one in flight,
+    // the probes lost, and when the next may go.
+    dg_max: i64 = H3_DATAGRAM,
+    probing: bool = false,
+    probes_lost: i64 = 0,
+    probe_at: i64 = 0,
     // The client's transport parameters, and flow control each way: what
     // this side may send on the connection, and has sent; what the client
     // may, has, and has had taken.
@@ -569,7 +586,7 @@ var h3touched_n: i64 = 0;
 var h3rx: u8[>..] = [];
 var h3rx_sizes: i32[H3_BATCH] = [0; H3_BATCH];
 var h3rx_peers: UdpPeer[H3_BATCH] = [UdpPeer { len: 0, addr: [0; 28] }; H3_BATCH];
-var h3q: u8[H3_TX_MAX * H3_DATAGRAM] = [0; H3_TX_MAX * H3_DATAGRAM];
+var h3q: u8[H3_TX_MAX * H3_DATAGRAM_MAX] = [0; H3_TX_MAX * H3_DATAGRAM_MAX];
 var h3q_len: i64 = 0;
 var h3tx_sizes: i32[H3_TX_MAX] = [0; H3_TX_MAX];
 var h3tx_peers: UdpPeer[H3_TX_MAX] = [UdpPeer { len: 0, addr: [0; 28] }; H3_TX_MAX];
@@ -950,11 +967,14 @@ fn detect_lost(ci: i64, s: i64, now: i64) {
             if p.in_flight { c.in_flight -= p.size; }
             if p.eliciting {
                 sp.eliciting_in_flight--;
-                oldest_lost = min(oldest_lost, p.time);
-                newest_lost = max(newest_lost, p.time);
+                if !p.probe {
+                    oldest_lost = min(oldest_lost, p.time);
+                    newest_lost = max(newest_lost, p.time);
+                }
             }
+            if p.probe { probe_lost(c, now); }
             refs_lost(ci, s, sent_refs(p));
-            any = any || p.in_flight;
+            any = any || (p.in_flight && !p.probe);
             let next = p.next;
             sent_unlink(ci, s, prev, k);
             k = next;
@@ -975,6 +995,22 @@ fn detect_lost(ci: i64, s: i64, now: i64) {
     if c.has_rtt && oldest_lost > c.first_rtt_at && newest_lost - oldest_lost > persistent {
         c.cwnd = H3_MIN_WINDOW;
         c.recovery_start = now;
+        // A path that stopped carrying the probed size (RFC 8899, section
+        // 4.3), until a later probe finds it again.
+        if c.dg_max > H3_DATAGRAM {
+            c.dg_max = H3_DATAGRAM;
+            c.probe_at = now + H3_PROBE_AGAIN_MS;
+        }
+    }
+}
+
+// A path MTU probe was lost: another goes, or after H3_PROBE_AGAIN_MS.
+fn probe_lost(c: H3Conn&, now: i64) {
+    c.probing = false;
+    c.probes_lost++;
+    if c.probes_lost >= H3_PROBE_TRIES {
+        c.probes_lost = 0;
+        c.probe_at = now + H3_PROBE_AGAIN_MS;
     }
 }
 
@@ -1012,8 +1048,15 @@ fn on_ack(ci: i64, s: i64, ranges: const QRange[:], largest: i64, delay: i64, no
             // NewReno grows outside recovery (section 7.3.2).
             if p.time > c.recovery_start {
                 if c.cwnd < c.ssthresh { c.cwnd += p.size; }
-                else { c.cwnd += H3_DATAGRAM * p.size / c.cwnd; }
+                else { c.cwnd += c.dg_max * p.size / c.cwnd; }
             }
+        }
+        // The probe's datagram, one packet, is the path's size now.
+        if p.probe {
+            c.probing = false;
+            c.probes_lost = 0;
+            c.dg_max = max(c.dg_max, p.size);
+            c.probe_at = 0x7fffffffffffffff;
         }
         if p.eliciting { sp.eliciting_in_flight--; }
         refs_acked(ci, s, sent_refs(p));
@@ -1640,7 +1683,7 @@ fn h3_tx_begin(k: i64, peer: const UdpPeer&) -> bool {
     return true;
 }
 
-// Queues datagram dg, at most H3_DATAGRAM bytes, for peer, once
+// Queues datagram dg, at most H3_DATAGRAM_MAX bytes, for peer, once
 // h3_tx_begin made room.
 fn h3_tx_end(k: i64, peer: const UdpPeer&, dg: const u8[:]) {
     net_copy(h3q[h3q_len..h3q_len + dg.len], dg);
@@ -1931,7 +1974,7 @@ fn h3_datagram_out(h3tx: u8[>..]&, h3refs_now: H3Ref[>..]&, refs: H3Ref[>..]&, c
     h3tx.clear();
     refs.clear();
     let start = 0;
-    var room = H3_DATAGRAM;
+    var room = c.dg_max;
     // Until the client's address is validated, at most three times what it
     // sent (RFC 9000, section 8.1).
     if !c.validated { room = min(room, 3 * c.rx_bytes - c.tx_bytes); }
@@ -2020,8 +2063,49 @@ fn h3_close_out(h3tx: u8[>..]&, ci: i64, now: i64) {
     h3_tx_end(c.listener, c.peer, h3tx);
 }
 
+// Sends connection ci's path MTU probe, if one is due: a datagram of the
+// size it probes for, one 1-RTT packet of a PING and padding, within the
+// congestion window. It goes alone, not through the queue: the socket sets
+// DF (IP_PMTUDISC_PROBE), so the kernel refuses it on a path with a smaller
+// MTU, and a GSO run with it would fail whole. Refused or not, it counts as
+// sent, and loss detection finds it lost.
+fn h3_probe_out(h3tx: u8[>..]&, ci: i64, now: i64) {
+    let c .= h3conns[ci];
+    guard c.shaken && !c.probing && now >= c.probe_at else { return; }
+    let size = min(H3_DATAGRAM_MAX, c.peer_params.max_udp_payload_size);
+    guard size > c.dg_max else {
+        c.probe_at = 0x7fffffffffffffff;
+        return;
+    }
+    guard c.cwnd - c.in_flight >= size else { return; }
+    h3tx.clear();
+    let sp .= c.sp[2];
+    let pn = sp.next_pn;
+    let pn_len = quic_pn_len(pn, sp.largest_acked);
+    h3tx.push((0x40 | ((c.phase as i64) << 2) | (pn_len - 1)) as! u8);
+    h3tx.append(c.dcid);
+    let pn_at = h3tx.len;
+    put_be(h3tx, pn, pn_len);
+    h3tx.push(QF_PING);
+    while h3tx.len < size - 16 { h3tx.push(QF_PADDING); }
+    let end = h3tx.len;
+    for i in 16 { h3tx.push(0); }
+    sp.next_pn++;
+    var built: H3Built[..3] = [];
+    built.push(H3Built { space: 2, at: 0, len_at: -1, pn_at: pn_at, pn_len: pn_len, pn: pn, end: end,
+                         eliciting: true, padded: false, refs_at: 0, refs_len: 0 });
+    var refs: H3Ref[>..] = [];
+    h3_seal(h3tx, ci, built, refs, now);
+    h3sent[c.sp[2].tail].probe = true;
+    c.probing = true;
+    c.tx_bytes += h3tx.len;
+    let sizes: i32[1] = [h3tx.len as i32];
+    let peers: UdpPeer[1] = [c.peer];
+    net_udp_send(h3fds[c.listener], h3tx, sizes, peers, false);
+}
+
 // Sends what connection ci has, as many datagrams as it takes, each laid out
-// in dg, with its packets' frames in refs.
+// in dg, with its packets' frames in refs, and its path MTU probe.
 fn h3_flush(ci: i64, now: i64) {
     var dg: u8[>..] = [];
     var refs_now: H3Ref[>..] = [];
@@ -2035,6 +2119,7 @@ fn h3_flush(ci: i64, now: i64) {
         }
         return;
     }
+    h3_probe_out(dg, ci, now);
     for i in 256 {
         guard h3conns[ci].live && h3conns[ci].state == H3_OPEN && h3_datagram_out(dg, refs_now, refs, ci, now) else {
             break;

@@ -462,6 +462,10 @@ int32_t net_udp_open(net_bytes addr, int32_t port, int32_t flags) {
              (ss.ss_family != AF_INET6 || setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof v6only) == 0);
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size);
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+    /* Its datagrams aren't fragmented (RFC 9000, section 14), so a path MTU
+       probe too large for the path is refused or dropped, not carried. */
+    if (ss.ss_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, &one, sizeof one);
+    else setsockopt(fd, IPPROTO_IP, IP_DONTFRAG, &one, sizeof one);
     if (!ok || bind(fd, (struct sockaddr *)&ss, len) < 0) {
         int e = errno;
         close(fd);
