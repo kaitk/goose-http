@@ -430,6 +430,14 @@ so does `/static/NAME`, as HttpArena's static profiles ask.
   downloads at once may queue there. A smaller file, which one read and a send serve
   faster, and a chunked response read up to 64 KB with `pread` per call.
 - `http::close_body(st.file)` at `CLOSED`.
+- `http::serve_cached(req, out, path, content_type, budget, st.file)`: answers as
+  `open_precompressed` and `serve_file` do, from the worker's cache: files of up to 64 KB
+  are read in once, while the cache holds at most `budget` bytes, and sent whole in the
+  request's turn. Each request stats the files it tries, and reads a file again when
+  its size, modification time, or inode changed. Larger files, and files past the
+  budget, come from the disk, with `send_file` at each `MORE` as above. Returns 200, or
+  404, 403, or 500 with nothing answered
+  ([decision](decisions.md#a-program-can-keep-small-files-in-a-workers-cache-that-follows-the-disk)).
 - `http::file_path(dir, name, path)`: appends to `path` the file in `dir` that `name`
   names, such as a route's `*name` parameter, decoded. False for a bad escape or a
   path that would leave `dir`, which `http::is_safe_path` checks: it rejects `.` and

@@ -536,7 +536,9 @@ int32_t net_stop_on_signals(void) {
 /* Opens path, UTF-8, for reading, as a HANDLE: a file on disk, else -EISDIR
    for a directory and -EINVAL for anything else. Other programs may read,
    write, rename, and delete it meanwhile, as on POSIX. Writes its size to
-   info[0] and its modification time, in seconds since the epoch, to info[1]. */
+   info[0] and its modification time, in seconds since the epoch, to info[1],
+   and, where info has room, that time's nanoseconds to info[2] and the file
+   ID to info[3]. */
 int64_t net_file_open(net_bytes path, net_i64s info) {
     WCHAR w[4096];
     if (path.len >= 4096 || memchr(path.data, 0, (size_t)path.len)) return -2;
@@ -555,12 +557,25 @@ int64_t net_file_open(net_bytes path, net_i64s info) {
         CloseHandle(h);
         return -22;
     }
+    uint64_t t = (uint64_t)fi.ftLastWriteTime.dwHighDateTime << 32 | fi.ftLastWriteTime.dwLowDateTime;
     if (info.len >= 2) {
         info.data[0] = (int64_t)((uint64_t)fi.nFileSizeHigh << 32 | fi.nFileSizeLow);
-        uint64_t t = (uint64_t)fi.ftLastWriteTime.dwHighDateTime << 32 | fi.ftLastWriteTime.dwLowDateTime;
         info.data[1] = (int64_t)((t - 116444736000000000ull) / 10000000ull);
     }
+    if (info.len >= 4) {
+        info.data[2] = (int64_t)((t - 116444736000000000ull) % 10000000ull * 100);
+        info.data[3] = (int64_t)((uint64_t)fi.nFileIndexHigh << 32 | fi.nFileIndexLow);
+    }
     return (int64_t)(intptr_t)h;
+}
+
+/* What net_file_open would answer for path: 0 and info, or -code. The file
+   ID that info[3] holds needs a handle, so this opens the file too. */
+int64_t net_file_stat(net_bytes path, net_i64s info) {
+    int64_t h = net_file_open(path, info);
+    if (h < 0) return h;
+    CloseHandle((HANDLE)(intptr_t)h);
+    return 0;
 }
 
 /* Reads buf.len bytes of the file at off into buf, fewer only at the file's

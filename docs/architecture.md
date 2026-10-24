@@ -213,6 +213,10 @@ small files ([measurements](results.md#static-files)). The loop closes a file ha
 to it, including when the connection closes first. A handler that keeps a file
 releases it at `CLOSED`.
 
+`http::serve_cached` keeps files of up to 64 KB in the worker's memory, within a budget
+the program gives, and checks each against the disk with a stat per request
+([decision](decisions.md#a-program-can-keep-small-files-in-a-workers-cache-that-follows-the-disk)).
+
 Precompressed files need no codec. Dynamic gzip, deflate, and zstd come from the
 optional `http.compression` module, over goose-compress's encoders, which are Goose
 and import nothing of HTTP. Negotiation and response framing stay in `http`, so a

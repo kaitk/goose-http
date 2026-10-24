@@ -1121,6 +1121,50 @@ Rejected: reworking HTTP/3's buffers so its copies are `append`s, which goes aga
 the globals that only grow (above) and changes the stream buffers throughout; and
 waiting for Goose, with static-h3 bound by copies meanwhile.
 
+## A program can keep small files in a worker's cache that follows the disk
+
+Decided 2026-10-24, Plod's task 062.
+
+`http::serve_cached` serves files as `open_precompressed` and `serve_file` do, from a
+cache that each worker keeps:
+
+- The program chooses it at the call that serves a route, with a byte budget. A
+  program that never calls it has no cache: the cache is the worker's globals in
+  `file.goose`, which only the workers that use them copy.
+- It holds files of at most `FILE_PIECE` (64 KB), and sends a cached file whole in the
+  request's turn. A response then holds nothing of the cache after its turn, so a file
+  replaced meanwhile needs no count of readers, and a response holds no more than
+  `send_file`'s one piece. Larger files are read from the disk as before.
+- It follows the disk. Each request stats the file, and each copy it tries, in place of
+  opening them, and compares the chosen file's size, modification time to the
+  nanosecond, and inode with what the cache read. A change reads the file again. The
+  inode catches a file replaced by `rename` at the same length and second, and one put
+  back with its old time, as HttpArena's staleness probe does both.
+- `.br`, `.zst`, and `.gz` copies are files of their own in the cache, chosen as
+  `open_precompressed` chooses them.
+- A file that doesn't fit what is left of the budget is served from the disk. Nothing
+  is evicted, and the cache isn't freed: a file's entry keeps its path, and is read
+  into again when the file changes.
+
+Why: on static-h2, the opens, `fstat`s, `pread`s, and closes of each request cost more
+kernel time than the response's sends (Plod's task 062). The cache cuts the kernel's
+cycles a request from 57 K to 29 K, and answers 60% more requests a second. On
+HTTP/1.1 over TLS and on HTTP/3 it gains 18% and 13%, where the sends cost more.
+
+Costs: each worker holds its own copy, since workers share nothing. HttpArena's
+requests reach 19 files, 258 KB, so 16.5 MB at 64 workers, and its entry's budget of
+1 MiB bounds that at 64 MiB. A stat per file tried still costs a path walk: about 2.25
+a request on HttpArena's files, 6 K to 17 K kernel cycles a request more than serving
+from memory with no check. An in-place rewrite at the same size, within one tick of
+the file system's clock, isn't seen; a replacement by `rename` is.
+
+Rejected: a cache filled once and never checked, which HttpArena's rules and its
+staleness probe refuse; checking only the chosen copy, which would keep serving a
+stale `.br` after its original is replaced; caching larger files, which needs a count
+of the responses still reading a file, since Goose frees memory only at scope exit;
+and `inotify`, which is Linux only and adds a descriptor and events to each worker's
+loop.
+
 ## Not yet decided
 
 ### Compression in an optional module

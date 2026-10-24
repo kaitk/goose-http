@@ -21,6 +21,7 @@
 namespace http;
 
 import std;
+import dictionary;
 import message;
 import media;
 import sys;
@@ -42,8 +43,10 @@ let FILE_PIECE = 65536;
 // 4 KB by 1.3 to 1.8 times, and they cross between 32 and 64 KB (task 020).
 let DIRECT_MIN = FILE_PIECE;
 
-// Writes info[0..2].
+// Write info[0..2], and with room info[2..4]: the size, the modification
+// time in seconds, that time's nanoseconds, and the inode.
 extern fn net_file_open(path: const u8[:], info: i64[:]) -> i64;
+extern fn net_file_stat(path: const u8[:], info: i64[:]) -> i64;
 extern fn net_file_read(fd: i64, buf: u8[:], off: i64) -> i64;
 extern fn net_file_close(fd: i64);
 // Sends up to len bytes of file fd from off on socket s: the bytes sent, 0 at
@@ -57,12 +60,13 @@ extern fn net_sendfile(s: i32, fd: i64, off: i64, len: i64) -> i64;
 fn open_file(path: const u8[:]) -> File, i32 {
     var info: i64[2] = [0; 2];
     let fd = net_file_open(path, info);
-    guard fd >= 0 else {
-        let e = -fd;
-        return File { .. }, if e == ENOENT || e == ENOTDIR || e == EISDIR || e == ENAMETOOLONG { 404 }
-                            else if e == EACCES { 403 } else { 500 };
-    }
+    guard fd >= 0 else { return File { .. }, file_status(-fd); }
     return File { fd: fd, size: info[0], modified: info[1] }, 200;
+}
+
+// open_file's status for the error code e.
+fn file_status(e: i64) -> i32 {
+    if e == ENOENT || e == ENOTDIR || e == EISDIR || e == ENAMETOOLONG { 404 } else if e == EACCES { 403 } else { 500 }
 }
 
 // Opens path as open_file does, or in its place the precompressed copy beside
@@ -72,6 +76,22 @@ fn open_file(path: const u8[:]) -> File, i32 {
 fn open_precompressed(req: const Request&, path: const u8[:]) -> File, i32 {
     let f, status = open_file(path);
     guard status == 200 else { return f, status; }
+    each_copy(req) { coding, ext =>
+        let v, s = open_file(str(path, ext));
+        if s == 200 {
+            if v.modified >= f.modified {
+                close_file(f);
+                return File { fd: v.fd, size: v.size, modified: v.modified, coding: coding, vary: true }, 200;
+            }
+            close_file(v);
+        }
+    };
+    return File { fd: f.fd, size: f.size, modified: f.modified, vary: true }, 200;
+}
+
+// Calls F(coding, ext) for each precompressed copy req accepts, in the order
+// open_precompressed tries them.
+fn each_copy<F>(req: const Request&) {
     let codings = ["br", "zstd", "gzip"];
     let exts = [".br", ".zst", ".gz"];
     var qs: i64[3] = [0; 3];
@@ -83,18 +103,8 @@ fn open_precompressed(req: const Request&, path: const u8[:]) -> File, i32 {
         }
         guard best >= 0 else { break; }
         qs[best] = 0;
-        var name: u8[>..] = [];
-        name.append(path);
-        name.append(exts[best]);
-        let v, s = open_file(name);
-        guard s == 200 else { continue; }
-        if v.modified >= f.modified {
-            close_file(f);
-            return File { fd: v.fd, size: v.size, modified: v.modified, coding: codings[best], vary: true }, 200;
-        }
-        close_file(v);
+        F(codings[best], exts[best]);
     }
-    return File { fd: f.fd, size: f.size, modified: f.modified, vary: true }, 200;
 }
 
 // Closes f, which open_file opened, for a file the program won't serve, such
@@ -118,36 +128,152 @@ fn close_body(b: FileBody&) {
 // false, and then ends the response with end. With none to send, as for
 // HEAD, the response has ended and f is closed.
 fn serve_file(req: const Request&, out: Reply, f: File, content_type: const u8[:], body: FileBody&) {
-    let tag = file_tag(f);
+    let a, e = file_head(req, out, f, content_type);
     body.fd = f.fd;
-    body.off = 0;
-    body.left = 0;
+    body.off = a;
+    body.left = e - a;
+    if body.left == 0 { close_body(body); }
+}
+
+// Starts serve_file's answer for f, and returns the range of f's bytes it
+// has still to send, a to e; none where the response has ended, as for HEAD.
+fn file_head(req: const Request&, out: Reply, f: File, content_type: const u8[:]) -> i64, i64 {
+    let tag = file_tag(f);
     if not_modified(req, tag, f.modified) {
         start(out, 304);
         file_fields(out, f, tag);
         finish(out, "", "");
-        close_body(body);
-        return;
+        return 0, 0;
     }
     let a, e, status = range_of(req, f.size, tag);
     if status == 416 {
         start(out, 416);
         content_range(out, 0, 0, f.size);
         finish(out, NO_TYPE, "");
-        close_body(body);
-        return;
+        return 0, 0;
     }
     begin(out, status, e - a);
     if status == 206 { content_range(out, a, e, f.size); }
     field(out, "Content-Type", content_type);
     if f.coding.len > 0 { field(out, "Content-Encoding", f.coding); }
     file_fields(out, f, tag);
-    body.off = a;
-    body.left = e - a;
-    if out.head || body.left == 0 {
+    if out.head || e == a {
         end(out);
-        close_body(body);
+        return 0, 0;
     }
+    return a, e;
+}
+
+// Answers as serve_file does for path, or for the copy of it that
+// open_precompressed would open, choosing the copy with a stat of each file
+// it tries in place of an open. A file of at most FILE_PIECE bytes is read
+// once into the worker's cache, while what the cache holds stays within
+// budget bytes, and sent from there whole, with no MORE. Each request checks
+// the file it chose by its stat's size, modification time, and inode, and
+// reads it again where they changed. The cache isn't freed; a file it can't
+// hold is served from the disk, with body for send_file. Returns 200, or
+// open_file's 404, 403, or 500 with nothing answered.
+fn serve_cached(req: const Request&, out: Reply, path: const u8[:], content_type: const u8[:], budget: i64,
+                body: FileBody&) -> i32 {
+    var info: i64[4] = [0; 4];
+    let e = net_file_stat(path, info);
+    guard e == 0 else { return file_status(-e); }
+    var coding = "";
+    var ext = "";
+    each_copy(req) { c, x =>
+        if coding.len == 0 {
+            var copy: i64[4] = [0; 4];
+            if net_file_stat(str(path, x), copy) == 0 && copy[1] >= info[1] {
+                info = copy;
+                coding = c;
+                ext = x;
+            }
+        }
+    };
+    let name = str(path, ext);
+    let k = cached_file(name, info, budget);
+    if k < 0 {
+        let d, s = open_file(name);
+        guard s == 200 else { return s; }
+        serve_file(req, out, File { fd: d.fd, size: d.size, modified: d.modified, coding: coding, vary: true },
+                   content_type, body);
+        return 200;
+    }
+    let c = file_cached[k];
+    let a, z = file_head(req, out, File { size: c.size, modified: c.modified, coding: coding, vary: true }, content_type);
+    if z > a {
+        send(out, file_bytes[c.at + a..c.at + z]);
+        end(out);
+    }
+    return 200;
+}
+
+// The worker's file cache, for serve_cached. A worker copies its globals,
+// which hold no references (spec §11.2), so its files' paths and bytes are
+// runs of file_bytes, by place. A file's entry stays once made, keeping its
+// path, and is read into again when the file changes; size is -1 while it
+// holds none. held counts the paths and the bytes held.
+struct CachedFile { path: i64 = 0, path_len: i64 = 0, at: i64 = 0, size: i64 = -1, modified: i64 = 0, ns: i64 = 0, ino: i64 = 0 }
+reusable[] var file_bytes: u8[>..] = [];
+var file_cached: CachedFile[>..] = [];
+var file_by_path: dictionary<u64, i32>;
+var file_held: i64 = 0;
+
+// The entry of file_cached that holds the file at name as info describes it,
+// read in where the entry holds another version or none, if it fits in
+// budget; or -1, for the disk.
+fn cached_file(name: const u8[:], info: const i64[:], budget: i64) -> i64 {
+    guard info[0] <= FILE_PIECE else { return -1; }
+    let h = hash(name);
+    var k: i64 = -1;
+    // ::get: the client's http::get would hide the dictionary's (spec §11.1).
+    let found = ::get(file_by_path, h);
+    if found {
+        let i: i64 = found;
+        k = i;
+        let c = file_cached[k];
+        // A path of the same hash as another's goes to the disk.
+        guard file_bytes[c.path..c.path + c.path_len] == name else { return -1; }
+        if c.size == info[0] && c.modified == info[1] && c.ns == info[2] && c.ino == info[3] { return k; }
+    } else {
+        guard file_held + name.len + info[0] <= budget else { return -1; }
+        let p = file_bytes.alloc_slice(name.len);
+        copy_into(p, name);
+        k = file_cached.len;
+        file_cached.push(CachedFile { path: file_bytes.index_of(p[0]), path_len: name.len });
+        file_by_path.insert(h, k as i32);
+        file_held += name.len;
+    }
+    let c .= file_cached[k];
+    if c.size > 0 { file_bytes.free_slice(file_bytes[c.at..c.at + c.size]); }
+    if c.size >= 0 { file_held -= c.size; }
+    c.size = -1;
+    // The open's size and times, which may be newer than info's.
+    var got: i64[4] = [0; 4];
+    let fd = net_file_open(name, got);
+    guard fd >= 0 else { return -1; }
+    guard got[0] <= FILE_PIECE && file_held + got[0] <= budget else {
+        net_file_close(fd);
+        return -1;
+    }
+    var at: i64 = 0;
+    if got[0] > 0 {
+        let run = file_bytes.alloc_slice(got[0]);
+        guard net_file_read(fd, run, 0) == got[0] else {
+            net_file_close(fd);
+            file_bytes.free_slice(run);
+            return -1;
+        }
+        at = file_bytes.index_of(run[0]);
+    }
+    net_file_close(fd);
+    c.at = at;
+    c.size = got[0];
+    c.modified = got[1];
+    c.ns = got[2];
+    c.ino = got[3];
+    file_held += got[0];
+    return k;
 }
 
 // The entity tag serve_file sends for f, quoted: its size and modification

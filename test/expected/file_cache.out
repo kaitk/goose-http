@@ -1,0 +1,11 @@
+a, read in: '12345', from the disk: false
+b, read in: '12345', from the disk: false
+c, past the budget: '12345', from the disk: true
+a, from the cache: '12345', from the disk: false
+a's bytes 1 to 2: '23', from the disk: false
+a, replaced: 'abcde', from the disk: false
+a, again: 'abcde', from the disk: false
+b as br: 'br', from the disk: false
+b as br, cached: 'br', from the disk: false
+b without: '12345', from the disk: false
+c, past FILE_PIECE: 65537 bytes, from the disk: true

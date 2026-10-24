@@ -702,16 +702,37 @@ int32_t net_stop_on_signals(void) {
 
 #define ERR(e) (e)
 
-/* Opens path, which holds no NUL, for reading: a regular file, else -EISDIR
-   for a directory and -EINVAL for anything else. O_NONBLOCK keeps a FIFO from
-   blocking the open; a regular file's reads ignore it. Writes its size to
-   info[0] and its modification time, in seconds since the epoch, to info[1]. */
-int64_t net_file_open(net_bytes path, net_i64s info) {
-    char p[4096];
-    if (path.len >= (int64_t)sizeof p) return -ERR(ENAMETOOLONG);
+/* path as a C string in p, or -code. */
+static int64_t file_cpath(net_bytes path, char p[4096]) {
+    if (path.len >= 4096) return -ERR(ENAMETOOLONG);
     if (memchr(path.data, 0, (size_t)path.len)) return -ERR(ENOENT);
     memcpy(p, path.data, (size_t)path.len);
     p[path.len] = 0;
+    return 0;
+}
+
+/* Writes st's size to info[0], its modification time in seconds since the
+   epoch to info[1], and, where info has room, that time's nanoseconds to
+   info[2] and the inode to info[3], which tell a replaced file apart. */
+static void file_info(const struct stat *st, net_i64s info) {
+    if (info.len >= 2) {
+        info.data[0] = (int64_t)st->st_size;
+        info.data[1] = (int64_t)st->st_mtime;
+    }
+    if (info.len >= 4) {
+        info.data[2] = (int64_t)st->st_mtim.tv_nsec;
+        info.data[3] = (int64_t)st->st_ino;
+    }
+}
+
+/* Opens path, which holds no NUL, for reading: a regular file, else -EISDIR
+   for a directory and -EINVAL for anything else. O_NONBLOCK keeps a FIFO from
+   blocking the open; a regular file's reads ignore it. Writes info as
+   file_info does. */
+int64_t net_file_open(net_bytes path, net_i64s info) {
+    char p[4096];
+    int64_t e0 = file_cpath(path, p);
+    if (e0 < 0) return e0;
     int fd = open(p, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return -ERR(errno);
     struct stat st;
@@ -724,11 +745,21 @@ int64_t net_file_open(net_bytes path, net_i64s info) {
         close(fd);
         return S_ISDIR(st.st_mode) ? -ERR(EISDIR) : -ERR(EINVAL);
     }
-    if (info.len >= 2) {
-        info.data[0] = (int64_t)st.st_size;
-        info.data[1] = (int64_t)st.st_mtime;
-    }
+    file_info(&st, info);
     return fd;
+}
+
+/* What net_file_open would answer for path, without opening it: 0 and info,
+   or -code. */
+int64_t net_file_stat(net_bytes path, net_i64s info) {
+    char p[4096];
+    int64_t e0 = file_cpath(path, p);
+    if (e0 < 0) return e0;
+    struct stat st;
+    if (stat(p, &st) < 0) return -ERR(errno);
+    if (!S_ISREG(st.st_mode)) return S_ISDIR(st.st_mode) ? -ERR(EISDIR) : -ERR(EINVAL);
+    file_info(&st, info);
+    return 0;
 }
 
 /* Reads buf.len bytes of fd at off into buf, fewer only at the file's end.
