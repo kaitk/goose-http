@@ -829,7 +829,10 @@ any thread ends the process ([crashes](patterns.md#a-crash-ends-the-process)).
 Windows), an IPv4 or IPv6 address, `"::"` for every address, IPv4 too unless
 `Config.ipv6_only`, or `"unix:/run/app.sock"` for a Unix socket on Linux and macOS,
 whose path fits in 104 bytes on macOS and 108 on Linux. The server removes a socket file
-left at the path before it binds, and its own when it stops.
+left at the path before it binds, and its own when it stops. Where it's empty, an h3
+listener's UDP socket takes every address, IPv6 too: a QUIC client that resolves
+`localhost` to `::1` first doesn't fall back to `127.0.0.1`, as a TCP client does when
+refused.
 
 A loop returns:
 

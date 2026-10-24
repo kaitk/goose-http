@@ -2785,6 +2785,11 @@ fn h3_listen<C, S>(p: H3Pair<C, S>&, cfg: const Config&, k: i64, port: i32) -> E
         guard ok else { return Error { call: "address", code: EINVAL }; }
         addr.append(a.ip);
         if cfg.ipv6_only { flags = flags | V6ONLY; }
+    } else {
+        // Every address, IPv6's too, where TCP's listener takes IPv4's: a QUIC
+        // client that resolves localhost to ::1 first doesn't fall back to
+        // 127.0.0.1, as a TCP client does when its connection is refused.
+        push_n(addr, 0, 16);
     }
     let fd = net_udp_open(addr, port, flags);
     guard fd >= 0 else { return Error { call: "udp", code: -fd }; }
