@@ -2,6 +2,21 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.10 (2026-10-24)
+
+HTTP/3. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`, and goose-compress
+`v0.1.4`. No breaking changes.
+
+Added:
+
+- HTTP/3 (RFC 9114) over QUIC version 1, written in Goose, in the optional module
+  `http.h3`, over goose-tls `v0.0.6`'s QUIC handshake and packet protection. It is off
+  unless a listener asks (`Listener.h3`, beside `tls`), and a program that doesn't
+  import the module opens no UDP socket ([API](docs/api.md#http3)). Linux's loops and
+  macOS's kqueue; no `later`, 0-RTT, or migration yet.
+- A listener with no address binds HTTP/3 to every address, IPv6's included, as its TCP
+  listener does.
+
 ## v0.5.9 (2026-10-24)
 
 A smaller worker, timers on time, and WebSockets up to `max_conns`. Goose `v2026.3`,
