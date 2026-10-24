@@ -383,9 +383,13 @@ Two layers:
   by the 8-byte Connection ID this side gave it, or by the client's first one until
   the client uses it. Its packets go through goose-tls, which removes and applies
   header protection and opens and seals each packet in place. ACKs, loss detection,
-  the PTO, and NewReno are RFC 9002's, each connection's timer in a heap. A flush
-  lays packets out in datagrams of at most 1,200 bytes, ACK first, then frames this
-  side owes, then CRYPTO, then the streams' data in turn, within the congestion window
+  the PTO, and NewReno are RFC 9002's, each connection's timer in a heap. Datagrams
+  are at most 1,200 bytes until the connection's path MTU probe (RFC 8899), a PING
+  padded to 1,452 bytes or the client's `max_udp_payload_size`, is acknowledged; the
+  socket sets DF, so a path that can't carry it drops or refuses it, and a lost probe
+  is no congestion. A flush lays packets out in those datagrams, ACK first, then
+  frames this side owes, then CRYPTO, then the streams' data in turn, within the
+  congestion window
   and, before the client's address is validated, three times what it sent; it seals
   them, records each packet's frames to send again if it's lost, and queues the
   datagrams, which go out together with `sendmmsg`.
