@@ -30,7 +30,7 @@
 #   4. The mixed run: a TIER=d server, warmed up with tier C at saturation,
 #      then tier C's reads at RATE_C, alone and beside the uploads role.
 #
-# may-minihttp, Tina, and Plod's Aegon servers have no tier D (task
+# may-minihttp, Tina, and Plod's Aegon and viltrum servers have no tier D (task
 # 021, and no_d below), so they
 # skip its checker and steps 2 and 4, and env.txt says why.
 #
@@ -163,7 +163,7 @@ no_d() {
     case $1 in
     may-minihttp) echo "it frames a request body by Content-Length alone, so can't read a chunked one" ;;
     tina) echo "reading a streamed body's pieces faults (SIGSEGV) after a few bodies in small chunks" ;;
-    aegon | aegon-small) echo "it reads a body whole before a route runs, so can't refuse one declared over the route's limit until it arrives" ;;
+    aegon | aegon-small | viltrum) echo "it reads a body whole before a route runs, so can't refuse one declared over the route's limit until it arrives" ;;
     esac
 }
 
