@@ -38,7 +38,7 @@ generation from OpenAPI, see [Plod](https://github.com/kaitk/plod).
 
 ## What it provides
 
-The latest tag, `v0.5.11`, provides all of this on every platform above:
+The latest tag, `v0.5.12`, provides all of this on every platform above:
 
 - A strict parser that guards against request smuggling and returns 414, 431, 501, and
   505 where appropriate; header fields, path, query, and percent-decoding support.
@@ -47,7 +47,8 @@ The latest tag, `v0.5.11`, provides all of this on every platform above:
 - Streaming request bodies and responses of any size; form and multipart bodies; JSON
   responses.
 - Static files with conditional `GET` and a single byte range; files over 64 KB are sent
-  without copying.
+  without copying, and smaller ones, where a program asks, from a cache in each worker
+  that checks the disk on every request.
 - Cookies, `Basic` authorization, media types, and `Accept` (406, 415).
 - Limits and timeouts per connection and per route, graceful shutdown, and an access log.
 - Deferred responses: waiting for another thread or a timer, long polling, and SSE.
@@ -71,7 +72,7 @@ a program also needs a C compiler and, on Linux, liburing:
 Save this as `hello.goose`:
 
 ```rust
-import http from "github.com/kaitk/goose-http@v0.5.11";
+import http from "github.com/kaitk/goose-http@v0.5.12";
 
 thread_fn worker(cfg: http::Config) {
     let e = http::serve(cfg) { req, body, out =>

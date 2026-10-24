@@ -2,6 +2,31 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.12 (2026-10-24)
+
+Small files from memory, and larger HTTP/3 datagrams. Goose `v2026.3`, goose-hash
+`v0.0.4`, goose-tls `v0.0.6`, and goose-compress `v0.1.4`. No breaking changes.
+
+Added:
+
+- `http::serve_cached` answers as `open_precompressed` and `serve_file` do, keeping
+  files of up to 64 KB in the worker's memory, within a byte budget the program gives,
+  and checking each against the disk with a `stat` on every request, so a replaced
+  file's next answer carries its new bytes
+  ([decision](docs/decisions.md#a-program-can-keep-small-files-in-a-workers-cache-that-follows-the-disk)).
+
+Changed:
+
+- HTTP/3 probes each connection's path for datagrams of 1,452 bytes, or the client's
+  `max_udp_payload_size`, once its handshake is confirmed, and sends them once the
+  probe is acknowledged. A lost probe isn't congestion. macOS's UDP sockets now set
+  DF, as Linux's do.
+
+On HttpArena's profiles over loopback, Plod's entry on 4 workers, built as its image
+builds it: static-h2 +60% requests a second with the cache (Plod's task 062);
+static-h3 6.7% fewer instructions a request, and baseline-h3 +2% to +3%, with the
+larger datagrams ([task 067](tasks/067-http3.md#round-3-2026-10-24)).
+
 ## v0.5.11 (2026-10-24)
 
 Faster HTTP/3, in less memory. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`,
