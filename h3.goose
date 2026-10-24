@@ -65,6 +65,10 @@ let H3_MAX_ACK_DELAY = 25;
 // The most of a response a stream queues before the handler is asked for
 // more (MORE).
 let H3_SEND_AHEAD = 131072;
+// The most a connection queues unsent before its new requests wait, as a TCP
+// server's reads wait on a full socket: what a server holds is then a
+// connection's queue, not every stream's whole response.
+let H3_QUEUED: i64 = 65536;
 // RFC 9002's constants: the RTT before a sample, the timer granularity, the
 // packet reordering threshold, and NewReno's windows.
 let H3_INITIAL_RTT = 333;
@@ -515,6 +519,8 @@ struct H3Conn {
     // The streams that may have bytes or their end to send, in the order
     // they're served in turn; a packet visits these, not every stream.
     sending: i32[..512] = [],
+    // The bytes queued on its streams and not yet sent once (H3_QUEUED).
+    queued: i64 = 0,
     turn: i64 = 0,
     // Frames owed: HANDSHAKE_DONE, MAX_DATA, MAX_STREAMS, PATH_RESPONSE, and
     // a CONNECTION_CLOSE, with its code.
@@ -634,6 +640,8 @@ fn strm_close(ci: i64, k: i64) {
         c.bidi_closed++;
         if c.bidi_max - c.bidi_closed <= H3_STREAMS / 2 { c.owe_max_streams = true; }
     }
+    // What a stopped stream never sent.
+    c.queued -= max(s.tx.end - s.tx.next, 0);
     rx_free(s.rx);
     tx_free(s.tx);
     s.conn = -1;
@@ -1205,6 +1213,7 @@ fn h3_shaken(ci: i64, now: i64) {
     qv_put(b, settings.len);
     b.append(settings);
     tx_put(st.tx, b);
+    h3conns[ci].queued += b.len;
     strm_sends(k);
 }
 
@@ -1835,6 +1844,7 @@ fn h3_packet_out(h3tx: u8[>..]&, h3refs_now: H3Ref[>..]&, ci: i64, s: i64, room:
             let fresh, wrote = h3_data_frames(h3tx, h3refs_now, st.tx, st.id, k, st.gen, eliciting_end,
                                               c.tx_max - c.tx_total);
             c.tx_total += fresh;
+            c.queued -= fresh;
             if !tx_pending(st.tx) { done = true; }
         }
         if n > 0 { c.turn = (c.turn + 1) % n; }
@@ -2160,6 +2170,7 @@ fn h3_queue_frame(k: i64, kind: i64, payload: const u8[:]) {
     qv_put(head, payload.len);
     tx_put(h3strms[k].tx, head);
     tx_put(h3strms[k].tx, payload);
+    h3conns[h3strms[k].conn].queued += head.len + payload.len;
     strm_sends(k);
 }
 
@@ -2747,17 +2758,25 @@ fn h3_serve_conn<S, H>(q: H3ServerOf<S>&, ci: i64, cfg: const Config&, fresh: co
                        common: const u8[:], now: i64) {
     let gone = Request { .. };
     var r = 0;
+    var waits = 0;
     while r < h3conns[ci].ready.len {
         guard h3conns[ci].live && h3conns[ci].state == H3_OPEN else { return; }
         let k: i64 = h3conns[ci].ready[r];
         r++;
         let st .= h3strms[k];
         if st.conn != ci || !st.readable { continue; }
+        // A new request waits, readable, while the connection's queue is
+        // full; a turn after its bytes go out takes it.
+        if st.kind == K_REQUEST && h3conns[ci].queued > H3_QUEUED && (q.ex.len <= k || !q.ex[k].called) {
+            h3conns[ci].ready[waits] = k as i32;
+            waits++;
+            continue;
+        }
         st.readable = false;
         if st.kind == K_REQUEST { h3_request_in(q, ci, k, cfg, fresh, common, now, H); }
         else if st.kind != K_CONTROL_OUT { h3_uni_in(ci, k, now); }
     }
-    h3conns[ci].ready.clear();
+    while h3conns[ci].ready.len > waits { h3conns[ci].ready.pop(); }
     guard h3conns[ci].live && h3conns[ci].state == H3_OPEN else { return; }
     // MORE for each stream with room, and the streams done closed, in one
     // pass; from the end, since strm_close takes a stream out of the list.
