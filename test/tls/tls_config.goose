@@ -3,7 +3,7 @@
 // h2c is h2 by prior knowledge, and over TLS ALPN chooses h2 (alpn.goose).
 import std;
 import http from "../../";
-import tls from "../../../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 
 fn main() {

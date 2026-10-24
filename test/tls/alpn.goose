@@ -5,7 +5,7 @@
 // against goose-tls's client, with a certificate made here.
 import std;
 import http from "../../";
-import tls from "../../../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 
 // The driver slot k of server chose for a client of cctx, after their

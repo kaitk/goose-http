@@ -672,7 +672,7 @@ without a loop. A program that imports it declares goose-tls in its root file, a
 
 ```rust
 import http from "github.com/kaitk/goose-http@<tag>";
-import tls from "github.com/kaitk/goose-tls@v0.0.5";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.client;
 
 var session = http::session();
@@ -933,7 +933,7 @@ goose-tls, which its root file declares, and it builds with CMake and OpenSSL's 
 
 ```rust
 import http from "github.com/kaitk/goose-http@<tag>";
-import tls from "github.com/kaitk/goose-tls@v0.0.5";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 
 thread_fn worker(cfg: http::Config, ctx: tls::Context) {

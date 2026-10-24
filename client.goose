@@ -2,10 +2,10 @@
 // command-line program's: each call blocks until its response has come, over
 // the blocking socket (socket.goose), and over goose-tls's client TLS for an
 // https URL. Only a program that imports this module needs goose-tls, which
-// its root file declares at the tag this file names:
+// its root file declares at the reference this file names:
 //
 //   import http from "github.com/kaitk/goose-http@<tag>";
-//   import tls from "github.com/kaitk/goose-tls@v0.0.5";
+//   import tls from "github.com/kaitk/goose-tls@v0.0.6";
 //   import http.client;
 //
 //   var session = http::session();
@@ -22,7 +22,7 @@
 namespace http;
 
 import std;
-import tls from "../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import sys;
 import message;
 import socket;

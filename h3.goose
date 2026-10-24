@@ -35,7 +35,7 @@ namespace http;
 import std;
 import os;
 import dictionary;
-import tls from "../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import sys;
 import message;
 import quic;

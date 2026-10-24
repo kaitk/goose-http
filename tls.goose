@@ -1,10 +1,10 @@
 // HTTP/1.1 and h2 over TLS in serve_epoll and serve, with goose-tls's server
 // TLS 1.3, written in Goose over OpenSSL 3's libcrypto (task 014). Only a
 // program that imports this module needs that package, which its root file
-// declares at the tag this file names:
+// declares at the reference this file names:
 //
 //   import http from "github.com/kaitk/goose-http@<tag>";
-//   import tls from "github.com/kaitk/goose-tls@v0.0.5";
+//   import tls from "github.com/kaitk/goose-tls@v0.0.6";
 //   import http.tls;
 //
 // The listeners with Listener.tls (or Config.tls for Config.port's) serve
@@ -34,7 +34,7 @@
 namespace http;
 
 import std;
-import tls from "../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import sys;
 import epoll;
 

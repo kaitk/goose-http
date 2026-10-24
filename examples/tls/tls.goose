@@ -5,7 +5,7 @@
 //   tls server.crt server.key
 import std;
 import http from "../../";
-import tls from "../../../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 
 thread_fn worker(cfg: http::Config, ctx: tls::Context) {

@@ -7,7 +7,7 @@
 import std;
 import os;
 import http from "../../";
-import tls from "../../../goose-tls-quic";
+import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 
 struct Chooser { challenge: tls::Context }
