@@ -712,13 +712,13 @@ void net_waker_close(int64_t h) {
     free(w);
 }
 
-/* CLOCK_MONOTONIC_RAW_APPROX is the value cached at the last context switch,
-   up to about 2 ms old, read without the hardware counter, as Linux's coarse
-   clocks are. macOS reads CLOCK_REALTIME without a syscall. std's clock_ns
-   and time_ns are the precise ones. */
+/* The loops' timers fall due by this clock, so it's the precise one, read
+   without a syscall: CLOCK_MONOTONIC_RAW_APPROX, the value cached at the
+   last context switch, is up to about 2 ms old. macOS reads CLOCK_REALTIME
+   without a syscall too. */
 int64_t net_clock_ms(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC_RAW_APPROX, &ts);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 

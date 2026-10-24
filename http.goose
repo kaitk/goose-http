@@ -151,7 +151,8 @@ struct Config {
     log: bool = false,
     // Answers that wait (later): each worker's box takes mail_slots replies
     // of up to mail_size bytes at once, and its timer table max_waiting
-    // exchanges waiting at once. With either at 0, the default, the loop opens
+    // exchanges waiting at once, a cell added as each is first needed. With
+    // either at 0, the default, the loop opens
     // no box and later's exchange gets TIMEOUT at once: a program that never
     // waits pays nothing. mail_slots is a power of two of at least 2; other
     // values stop the loop with mail_open's EINVAL. A box needs max_conns of

@@ -359,7 +359,10 @@ an event loop. A loop opens a box and a timer table only when `Config.mail_slots
 `Config.max_waiting` are positive.
 
 Each worker's box tracks the keys of exchanges that wait, in an atomic table of
-`Config.max_conns` entries: 8 bytes each, 128 KiB at the default. `later` marks the
+`Config.max_conns` entries: 8 bytes each, 128 KiB at the default, of which a worker
+commits only the pages its connections' keys reach. Its timer table adds a cell as a
+wait needs one, up to `Config.max_waiting`, and keeps it, so a worker's waits cost what
+its busiest moment held. `later` marks the
 exchange's key live before it returns, so a reply can arrive before the handler
 returns. The key stays live through `WAKE`, so a reply sent in pieces finds it live
 between one piece and the handler's next `later`, and is cleared once the handler

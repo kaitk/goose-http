@@ -1,3 +1,4 @@
 order: [20, 40, 60, 80, 100]
 full and stale: fired [5, 1]
 rearm: 2 fired over two calls
+growth: 2 cells for 2 timers

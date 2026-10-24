@@ -189,6 +189,9 @@ int64_t mail_open(int32_t slots, int32_t size, int64_t waker, int32_t live_count
     for (uint32_t i = 0; i < (uint32_t)slots; i++) STORE32_RELEASE(&mail_at(b, i)->seq, i);
     b->live_count = (uint32_t)live_count;
     b->key_shift = (uint32_t)key_shift;
+    /* calloc's zeroes need no stores of their own, which would commit every page
+       of a table sized for the most connections: senders reach the box only
+       through the key returned below, as they reach b itself. */
     if (live_count) {
         b->live = calloc((size_t)live_count, sizeof *b->live);
         if (!b->live) {
@@ -196,7 +199,6 @@ int64_t mail_open(int32_t slots, int32_t size, int64_t waker, int32_t live_count
             free(b);
             return -MAIL_ENOMEM;
         }
-        for (int32_t j = 0; j < live_count; j++) STORE64_SEQ(&b->live[j], 0);
     }
     b->own_waker = waker == 0;
     b->waker = waker ? waker : net_waker(-1, 0);

@@ -411,12 +411,13 @@ int32_t net_epoll_wait(int32_t ep, net_events out, int32_t timeout_ms) {
     return n;
 }
 
-/* The coarse clocks return the time of the last scheduler tick, 1 to 4 ms
-   old by the kernel's HZ, without reading the hardware counter. std's
-   clock_ns and time_ns are the precise ones. */
+/* The loops' timers fall due by this clock, so it's the precise one, read
+   through the vDSO once per pass: the coarse clock is the last scheduler
+   tick, 1 to 4 ms old by the kernel's HZ, and made a timer that late. The
+   wall clock, read for whole seconds, stays coarse. */
 int64_t net_clock_ms(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 

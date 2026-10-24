@@ -127,8 +127,8 @@ extern fn net_epoll_ctl(ep: i32, op: i32, fd: i32, events: u32, tag: u64) -> i32
 // Writes the ready events into out[..n], n at most out.len and 1024.
 extern fn net_epoll_wait(ep: i32, out: PollEvent[:], timeout_ms: i32) -> i32;
 
-// Coarse clocks, up to one scheduler tick old: monotonic milliseconds, and
-// wall-clock seconds since the epoch.
+// Monotonic milliseconds, precise, which the loops' timers fall due by; and
+// wall-clock seconds since the epoch, up to one scheduler tick old.
 extern fn net_clock_ms() -> i64;
 extern fn net_time_s() -> i64;
 

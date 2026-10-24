@@ -66,8 +66,26 @@ fn test_rearm() {
     print("rearm: ", fired, " fired over two calls");
 }
 
+// A table adds cells only as timers need them, reuses a freed cell before
+// adding one, and adds none past its capacity.
+fn test_growth() {
+    var t = http::timer_table(1 << 20);
+    assert(t.cells.len == 0);
+    let a = http::arm(t, 1, 10);
+    let b = http::arm(t, 2, 20);
+    assert(t.cells.len == 2);
+    http::cancel(t, a);
+    let c = http::arm(t, 3, 30);
+    assert(c.slot == a.slot && t.cells.len == 2 && http::armed(t, b));
+    var small = http::timer_table(2);
+    for k in 5 { http::arm(small, k as u64, k); }
+    assert(small.cells.len == 2 && small.count == 2);
+    print("growth: ", t.cells.len, " cells for ", t.count, " timers");
+}
+
 fn main() {
     test_order();
     test_full_and_stale();
     test_rearm();
+    test_growth();
 }

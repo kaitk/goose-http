@@ -2,6 +2,19 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## Unreleased
+
+Changed:
+
+- The loops' timers fall due by the precise monotonic clock on Linux and macOS, not
+  the coarse one, which is up to a scheduler tick old: `/delay/10` at 64 connections
+  answered in 12.2 ms, and now in 10.2 ms
+  ([decisions](docs/decisions.md#timers-fall-due-by-the-precise-monotonic-clock)).
+- A timer table adds its cells as timers need them, up to its capacity, rather than
+  writing every cell at open, and a box's table of live keys is left as `calloc`
+  zeroed it. A worker with `max_waiting` at `max_conns`, 16,384, held about 0.8 MiB
+  before its first wait; now it holds what its waits use.
+
 ## v0.5.8 (2026-10-23)
 
 Compression from 256 bytes, and goose-compress `v0.1.4`. Goose `v2026.3`, goose-hash

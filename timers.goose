@@ -1,6 +1,7 @@
-// A timer table: a fixed number of deadlines, each with a 64-bit key the
-// table doesn't read, in a min-heap, allocated whole at open and never
-// grown. A timer is a Handle (handle.goose), so cancelling one that has
+// A timer table: up to a fixed number of deadlines, each with a 64-bit key
+// the table doesn't read, in a min-heap. Its cells are added as timers need
+// them, up to the capacity, and kept once added, so a table costs what its
+// busiest moment armed, not its capacity. A timer is a Handle (handle.goose), so cancelling one that has
 // fired, or whose cell a later timer took, does nothing. Nothing here knows
 // HTTP: this file imports nothing of the package's HTTP side, so that it can
 // move to a package of its own unchanged.
@@ -24,22 +25,22 @@ struct TimerCell { at: i64, key: u64, gen: u32, pos: i64, heap: i64, next: i64 }
 struct Timers {
     count: i64,         // armed timers, the heap's length
     free: i64,          // the first free cell, or -1
+    capacity: i64,      // the most cells
     cells: TimerCell[>..],
 }
 
 // A table of capacity timers, all free.
 fn timer_table(capacity: i64) -> Timers {
-    var t = Timers { count: 0, free: if capacity > 0 { 0 } else { -1 }, cells: [] };
-    for i in capacity {
-        t.cells.push(TimerCell { at: 0, key: 0, gen: 1, pos: -1, heap: 0,
-                                 next: if i + 1 < capacity { i + 1 } else { -1 } });
-    }
-    return t;
+    return Timers { count: 0, free: -1, capacity: max(capacity, 0), cells: [] };
 }
 
 // Arms a timer that falls due at at, with key. Returns it, or a Handle with
 // slot -1 when every cell is armed.
 fn arm(t: Timers&, key: u64, at: i64) -> Handle {
+    if t.free < 0 && t.cells.len < t.capacity {
+        t.free = t.cells.len;
+        t.cells.push(TimerCell { at: 0, key: 0, gen: 1, pos: -1, heap: 0, next: -1 });
+    }
     let i = t.free;
     guard i >= 0 else { return Handle { .. }; }
     let c .= t.cells[i];

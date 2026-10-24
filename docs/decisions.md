@@ -976,6 +976,33 @@ no longer asks for it: its harness at `3717e25` sends `/json/25`, `/json/40`, an
 The trade-off: a body of 256 to 1,023 bytes now costs a compression call, a few µs at
 level 1.
 
+## Timers fall due by the precise monotonic clock
+
+Decided 2026-10-24, task 065. Replaces the coarse clocks that `net_clock_ms` read
+since the shim was written (task 002), on Linux and macOS.
+
+`net_clock_ms` is the loops' clock: each pass reads it once, and their timers, request
+deadlines, and idle sweep count by it. It read `CLOCK_MONOTONIC_COARSE` on Linux, the
+time of the last scheduler tick, and `CLOCK_MONOTONIC_RAW_APPROX` on macOS, the value
+at the last context switch. Up to 4 ms stale at `HZ=250`, it made a waiting answer
+late twice: the wait counted from a start that had already passed, and on waking the
+stale clock could say the timer wasn't due yet. On a Ryzen 7 5800X3D under WSL2
+(kernel 6.18.54.1, `HZ=250`), goose-http's server with 8 workers and `/delay/10` under
+wrk at 64 connections answered at a median of 12.2 ms on both loops; with
+`CLOCK_MONOTONIC`, at 10.2 ms, p99 10.5 ms. HttpArena's async profile is closed-loop
+on `/delay/10` at 32,000 connections, so its rate is the connections over that time.
+
+`CLOCK_MONOTONIC` and macOS's `CLOCK_MONOTONIC_RAW` are read without a syscall: on that
+machine 20.9 ns a read against the coarse clock's 4.3 ns, 17 ns more per pass. The wall clock that the `Date` field reads
+once a pass, in whole seconds, stays coarse. Windows' `GetTickCount64` is unchanged:
+its completion port's waits are in milliseconds at the system timer's resolution
+anyway.
+
+Rejected: a second, precise clock for the timers alone, beside the coarse one for
+deadlines, which would read two clocks a pass to save 17 ns; and nanosecond waits
+(`epoll_pwait2`, as viltrum v1.5.1 uses), which help only deadlines finer than a
+millisecond, and `later` takes milliseconds.
+
 ## Not yet decided
 
 ### Compression in an optional module
