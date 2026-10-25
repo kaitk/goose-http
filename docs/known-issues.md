@@ -134,6 +134,9 @@ to `LOOP=epoll`. Before the example called `stop_on_signals`, the epoll half fai
 with `ECONNRESET` or `ECONNREFUSED` in 11 of 40 runs in an arm64 Linux container with native
 io_uring (kernel 7.0, Docker Desktop on macOS): `waitpid` returned with the uring
 server's listener still in `/proc/net/tcp`, for 2 to 6 ms (2026-10-23).
+`scripts/test-drain-turns.py` does the same with `scripts/fixtures/drain_turns.goose`,
+whose epoll half failed with `ECONNRESET` once in WSL2 before the fixture called
+`stop_on_signals` too (2026-10-25).
 
 ## Benchmarks
 

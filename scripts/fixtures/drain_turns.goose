@@ -36,6 +36,7 @@ thread_fn worker(cfg: http::Config) {
 }
 
 fn main() {
+    http::exit_on_error(http::stop_on_signals());
     http::run(http::Config { address: "127.0.0.1", port: 27894, workers: 1,
         max_conns: 8, write_ms: 1000, body_ms: 1000, idle_ms: 1000, .. }, worker);
 }
