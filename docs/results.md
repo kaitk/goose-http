@@ -17,6 +17,82 @@ WSL2 loopback runs through a VM; its kernel cost differs from bare metal. Runs t
 2026-10-12 use kernel 6.18.40.1-microsoft-standard-WSL2. The 2026-10-14 runs use
 6.18.54.1-microsoft-standard-WSL2. Each run's `env.txt` records the environment.
 
+## 2026-10-25: v0.5.12, Goose builds only
+
+Plod's `bench/all.sh` measured this repository in session `2026-10-25T2003-Tiamat`:
+`35805477` (`v0.5.12`), Goose `v2026.3`, gcc 15.2.0, kernel
+6.18.54.1-microsoft-standard-WSL2, on the desktop described above, with Plod at
+`5c6b3a1` (`v0.5.9`). The machine passed the idle check. This repository's tests
+failed in the session in `test-drain.sh` only: `test-drain-turns.py`'s epoll half
+read `ECONNRESET`, which three reruns didn't repeat; its fixture now stops on signals
+([known issues](known-issues.md#a-killed-io_uring-servers-listener-outlives-it)). The
+tiny-response `key.txt` matches 2026-10-22's. The
+[steps](../bench/results/2026-10-25T2003-Tiamat/session-steps.txt) and
+[environment](../bench/results/2026-10-25T2003-Tiamat/session-env.txt) are kept. No
+competitors were rerun, and the [current benchmarks](benchmarks.md) keep 2026-10-20's
+numbers.
+
+### Tiny responses
+
+The method of 2026-10-20. Four-worker medians and ranges from the
+[summary](../bench/results/2026-10-25T2003-Tiamat/summary.md), against 2026-10-22:
+
+| Loop | Test | Connections | req/s, median (range) | Change |
+|---|---|---:|---:|---:|
+| io_uring | plaintext | 256 | 6.344 M (5.863-6.443 M) | +3.9% |
+| io_uring | plaintext | 1,024 | 6.176 M (5.859-6.355 M) | +3.6% |
+| io_uring | plaintext | 4,096 | 5.841 M (5.467-5.875 M) | +2.5% |
+| io_uring | JSON | 256 | 464 K (436-480 K) | -2.9% |
+| io_uring | JSON | 1,024 | 458 K (427-469 K) | -2.6% |
+| epoll | plaintext | 256 | 4.841 M (4.513-4.888 M) | -0.2% |
+| epoll | plaintext | 1,024 | 4.766 M (4.460-4.787 M) | -1.2% |
+| epoll | plaintext | 4,096 | 4.667 M (4.279-4.708 M) | -0.2% |
+| epoll | JSON | 256 | 380 K (354-380 K) | +0.3% |
+| epoll | JSON | 1,024 | 369 K (351-372 K) | -2.4% |
+
+Every cell has zero errors and no clock steps. The ranges are wider than 2026-10-22's,
+up to 8.3% of the median. Peak RSS across the tiny-response cells is 3.6-5.2 MB on epoll
+and 4.4-10.1 MB on io_uring.
+
+[Counts](../bench/results/2026-10-25T2003-Tiamat/instructions.txt), by
+`bench/instructions.sh` as on 2026-10-20:
+
+| Loop | Instructions/req | User instructions/req | Cycles/req | Peak RSS |
+|---|---:|---:|---:|---:|
+| epoll | 2,547-2,579 | 1,610-1,630 | 2,090-2,111 | 3.5-3.6 MB |
+| io_uring | 2,604-2,627 | 1,635-1,649 | 1,795-1,805 | 4.7-4.8 MB |
+
+User instructions are within 0.4% of 2026-10-22's; cycles are 3-6% fewer.
+
+### REST and static files
+
+REST by the method of 2026-10-20, on this repository alone and on Plod.
+The [REST summary](https://github.com/kaitk/plod/blob/main/bench/results/2026-10-25T2003-rest-Tiamat/summary.md)
+and [notes](https://github.com/kaitk/plod/blob/main/bench/results/2026-10-25T2003-rest-Tiamat/notes.md)
+keep both repositories' results. This repository alone:
+
+| Loop | A | B | C | C, templates | Uploads alone |
+|---|---:|---:|---:|---:|---:|
+| io_uring | 579.0 K/s | 298.4 K/s | 60.5 K/s | 147.2 K/s | 1,113/s |
+| epoll | 422.1 K/s | 232.3 K/s | 59.2 K/s | 138.8 K/s | 1,139/s |
+
+Against 2026-10-22 that is -2.4% to +1.8% on io_uring and -1.7% to +3.5% on epoll.
+Every cell has zero errors.
+
+Static files by the method of 2026-10-20
+([summary](../bench/results/2026-10-25T2003-Tiamat-files/summary.md)):
+
+| Server | 4 KB, 1 worker | 4 KB, 4 | 64 KB, 1 | 64 KB, 4 | 1 MB, 1 | 1 MB, 4 |
+|---|---:|---:|---:|---:|---:|---:|
+| epoll | 54.5 K/s | 183 K/s | 2.15 GB/s | 7.67 GB/s | 10.68 GB/s | 21.42 GB/s |
+| io_uring | 84.6 K/s | 222 K/s | 2.03 GB/s | 6.57 GB/s | 10.49 GB/s | 21.23 GB/s |
+| emulated ring | 74.6 K/s | 209 K/s | 2.79 GB/s | 8.09 GB/s | 12.62 GB/s | 21.42 GB/s |
+
+Every cell has zero errors. Against 2026-10-22, io_uring's 4 KB with one worker is
+6.0% higher and the emulated ring's 4.3%, the one-worker cells at 64 KB 4.1-4.6%
+higher, and at 1 MB -0.7% to +3.6%; the four-worker cells are within 1.8%. At 1 MB with four workers, wrk again consumes its limit, 80.2 s of CPU in each
+10 s run.
+
 ## 2026-10-22: v0.5.4, Goose builds only
 
 Plod's (then goose-rest's) `bench/all.sh` measured this repository in session

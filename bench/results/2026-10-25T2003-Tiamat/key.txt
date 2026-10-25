@@ -1,0 +1,11 @@
+method: 1
+kernel: 6.18.54.1-microsoft-standard-WSL2
+cpu: AMD Ryzen 7 5800X3D 8-Core Processor, 16 logical CPUs
+server cpus: 0-3, client cpus: 4-15, client threads: 8
+duration: 15 s, warm-up: 5 s, latency: 1
+wrk: wrk debian/4.1.0-4build3 [epoll] Copyright (C) 2012 Will Glozer
+h2load: h2load nghttp2/1.68.0
+52099c5c87ddad3053e0abe05b7aa3253f6f32f93e6ab05599f56c71356f0d80  scripts/pipeline.lua
+3a0162c2c182f0aaad12db027b75734f2d3c38d0fb6bd9c30103409feaa48aad  bench/wrk-monotonic.c
+8e60c7f0eb7b1e3ed29d12a2eb759b4da192c82d3669139d74f4da1aee637223  bench/latency.c
+5d55739ed87c4cff00e67f4dc380aa411778e3095e497e662d36b40e1b7a84a8  bench/clockstep.py

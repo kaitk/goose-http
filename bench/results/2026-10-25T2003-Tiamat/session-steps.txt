@@ -1,0 +1,10 @@
+goose-http tests	failed	1 min 08 s
+Plod tests	ok	8 min 37 s
+goose-http build	ok	0 min 37 s
+Plod build	ok	1 min 27 s
+REST check	ok	0 min 19 s
+goose-http run.sh	ok	37 min 35 s
+goose-http files.sh	ok	12 min 03 s
+REST run	ok	1 h 27 min
+goose-http instructions	ok	2 min 02 s
+REST count	ok	2 min 41 s
