@@ -2,6 +2,17 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.13 (2026-10-27)
+
+A macOS build fix. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`, and
+goose-compress `v0.1.4`. No breaking changes.
+
+Fixed:
+
+- macOS: `shim/kqueue.c` compiles again. `v0.5.12` set `IPV6_DONTFRAG` on UDP sockets,
+  which Apple's headers declare only with `__APPLE_USE_RFC_3542`, so every program
+  failed to build there.
+
 ## v0.5.12 (2026-10-24)
 
 Small files from memory, and larger HTTP/3 datagrams. Goose `v2026.3`, goose-hash
