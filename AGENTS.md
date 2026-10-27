@@ -26,8 +26,9 @@ Follow the recorded decisions; if a change contradicts one, update the doc in th
 change or ask first. Record setup facts you find (paths, versions, install steps) in
 `docs/development.md`, and environment traps (shell quirks, ports, encodings, dated
 incidents) in `docs/known-issues.md`, not in agent memory, so the next agent finds
-them. Docs and commits name no people: date a decision or a request
-(`(2026-10-11)`), and describe the setup without anyone's machine, checkouts, or home
+them. Docs and commits don't credit a decision or a request to a person, as in
+"Kait asked": date it (`(2026-10-11)`). A name goes only where one belongs, such as
+a copyright line or another project's author. Describe the setup without anyone's machine, checkouts, or home
 directory. What only one machine needs, such as where its Goose checkout is, goes in
 `CLAUDE.local.md`, which git ignores. Benchmark results still name their machine. The
 docs and scripts must work for a developer on a clean machine without LLM tools:
