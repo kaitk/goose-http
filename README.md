@@ -246,3 +246,10 @@ thread-per-core framework in Odin, and its author's post
 
 One more comes from Tina: a lane's stop can't be crowded out by traffic, as Tina
 reserves messages for shutdown (here a flag in the box, `http::mail_stop`).
+
+## License
+
+Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option. Unless you state otherwise, any
+contribution you submit for inclusion, as defined in the Apache-2.0 license, is
+licensed the same way, without any additional terms or conditions.
