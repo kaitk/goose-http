@@ -203,13 +203,17 @@ fn quic_pn_len(pn: i64, acked: i64) -> i64 {
 
 // The packet numbers received in one space, as ranges, highest first, which
 // an ACK frame reports (§19.3). The oldest go once the list is full: their
-// packets are long acknowledged, or never will be.
+// packets are long acknowledged, or never will be. floor is the highest
+// packet number dropped with them, and nothing at or below it is accepted
+// again (§13.2.3).
 struct QRange { lo: i64, hi: i64 }
 let QUIC_RANGES = 32;
-struct QRanges { r: QRange[..QUIC_RANGES] = [] }
+struct QRanges { r: QRange[..QUIC_RANGES] = [], floor: i64 = -1 }
 
-// Adds pn; false when it was there already, a duplicate.
+// Adds pn; false when it was there already, a duplicate, or can't be told
+// from one: at or below floor, or below every range of a full list.
 fn quic_ranges_add(s: QRanges&, pn: i64) -> bool {
+    if pn <= s.floor { return false; }
     // The ranges before i start above pn + 1, so none of them touches pn.
     var i = 0;
     while i < s.r.len && s.r[i].lo > pn + 1 { i++; }
@@ -230,8 +234,8 @@ fn quic_ranges_add(s: QRanges&, pn: i64) -> bool {
         }
     }
     if s.r.len == QUIC_RANGES {
-        guard i < QUIC_RANGES else { return true; }
-        s.r.pop();
+        guard i < QUIC_RANGES else { return false; }
+        s.floor = s.r.pop().hi;
     }
     s.r.insert_at(i, QRange { lo: pn, hi: pn });
     return true;

@@ -86,6 +86,18 @@ fn ranges() {
     print("read back: ", back, ", largest ", largest, ", delay ", delay, ", ", ok);
 }
 
+// A full list drops its oldest range, and a packet in it, or below every kept
+// range, counts as a duplicate rather than a new one (RFC 9000, 13.2.3).
+fn ranges_full() {
+    var s = http::QRanges { .. };
+    for k in 34 { http::quic_ranges_add(s, k * 3); }
+    print("kept: ", s.r.len, ", lowest ", s.r[s.r.len - 1].lo, ", floor ", s.floor);
+    eq_bool("a dropped one again", http::quic_ranges_add(s, 3), false);
+    eq_bool("one below the floor", http::quic_ranges_add(s, 1), false);
+    eq_bool("one below every kept range", http::quic_ranges_add(s, 4), false);
+    eq_bool("one beside a kept range", http::quic_ranges_add(s, 7), true);
+}
+
 // A client's transport parameters: its initial_source_connection_id must be
 // the Source Connection ID of its Initial, and it may not send one only a
 // server sends.
@@ -138,6 +150,7 @@ fn main() {
     varints();
     packet_numbers();
     ranges();
+    ranges_full();
     params();
     qpack();
 }

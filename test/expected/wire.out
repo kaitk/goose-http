@@ -13,6 +13,11 @@ a duplicate: false
 filled: [12-12][0-9]
 ACK: 020c40fa01000109
 read back: [12-12][0-9], largest 12, delay 250, true
+kept: 32, lowest 6, floor 3
+a dropped one again: false
+one below the floor: false
+one below every kept range: false
+one beside a kept range: true
 a client's: true
   initial_max_data 1048576, initial_max_streams_bidi 100, max_ack_delay 25
 another Source Connection ID: false
