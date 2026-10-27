@@ -8,6 +8,9 @@
    failure, where code is errno translated to its Linux number (net_err), the
    values src/sys.goose names. None of them keeps a pointer into Goose memory
    after it returns. */
+/* <netinet6/in6.h> declares IPV6_DONTFRAG only with this, before any
+   include. */
+#define __APPLE_USE_RFC_3542
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
