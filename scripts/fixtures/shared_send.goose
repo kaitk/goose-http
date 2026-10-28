@@ -1,7 +1,10 @@
 // send_shared in a loop: inline bytes and a blob's ranges, interleaved, the
 // handler's reference dropped at once, and the blob's last reference the
 // handler's own again by DRAINED, whether the socket took it all (/small)
-// or the loop had to keep the rest (/large, behind a stalled reader).
+// or the loop had to keep the rest (/large, behind a stalled reader). LOOP
+// picks the loop: epoll, uring (io_uring, required), emulated (the ring's
+// emulation), or serve's own choice otherwise. With GATHERS=1 the loop must
+// hold a reference for each range until it sends it, not copy it.
 import std;
 import os;
 import http from "../../";
@@ -9,7 +12,8 @@ import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import http.websocket;
 import http.shared;
 
-struct State { ws: http::WebSocket = http::WebSocket { .. }, blob: http::Shared = http::Shared { .. }, done: bool = false }
+struct State { ws: http::WebSocket = http::WebSocket { .. }, blob: http::Shared = http::Shared { .. }, done: bool = false,
+               gathers: bool = false }
 
 fn handle(ev: http::Event, state: State&, out: http::Reply) {
     if ev.kind == http::REQUEST {
@@ -30,29 +34,43 @@ fn handle(ev: http::Event, state: State&, out: http::Reply) {
         http::send(out, ">");
         // The handler's other reference, and the loop's for each range if it gathers.
         let left = http::shared_release(b);
-        assert(left == 1 || left == 3);
+        assert(left == (if state.gathers { 3 } else { 1 }));
         assert(http::after_drain(out));
     } else if ev.kind == http::DRAINED && !state.done {
         state.done = true;
         assert(http::shared_release(state.blob) == 0);
         http::send(out, "!");
         assert(http::after_drain(out));
+    } else if ev.kind == http::CLOSED && !state.done && state.blob.h != 0 {
+        // A client that left early: the loop may still hold its ranges.
+        state.done = true;
+        assert(http::shared_release(state.blob) >= 0);
     } else if ev.kind != http::DRAINED {
         http::ws_read(ev, state.ws, out) { op, data, reply => };
     }
 }
 
 thread_fn worker(cfg: http::Config) {
-    var loop_name: u8[>..] = [];
-    let error = if env("LOOP", loop_name) && loop_name == "epoll" {
-        http::serve_epoll(cfg, State { .. }) { ev, state, out => handle(ev, state, out); }
+    var name: u8[>..] = [];
+    var gathers: u8[>..] = [];
+    let fresh = State { gathers: env("GATHERS", gathers) && gathers == "1", .. };
+    let error = if env("LOOP", name) && name == "epoll" {
+        http::serve_epoll(cfg, fresh) { ev, state, out => handle(ev, state, out); }
     } else {
-        http::serve(cfg, State { .. }) { ev, state, out => handle(ev, state, out); }
+        var ring = cfg;
+        ring.require_ring = name == "uring";
+        ring.emulate_ring = name == "emulated";
+        http::serve(ring, fresh) { ev, state, out => handle(ev, state, out); }
     };
     http::report(error);
 }
 
 fn main() {
+    var name: u8[>..] = [];
+    if env("LOOP", name) && name == "uring" && http::ring_probe() != 0 {
+        print("no io_uring here");
+        return;
+    }
     http::run(http::Config { address: "127.0.0.1", port: 27895, workers: 1,
         max_conns: 8, write_ms: 10000, idle_ms: 10000, .. }, worker);
 }
