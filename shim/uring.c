@@ -11,8 +11,9 @@
    queued them returns, and spec §7.10 forbids C to keep a Goose argument past
    a call. So the ring owns every buffer the kernel touches: receives land in
    its provided buffers, which ur_take copies out of, ur_send copies the
-   bytes it's given, and ur_send_file splices a file through a pipe of its
-   own. A send of UR_INLINE bytes or more that finds nothing queued on its
+   bytes it's given, ur_send_shared copies those and holds references to
+   the shared blobs it sends from, and ur_send_file splices a file through
+   a pipe of its own. A send of UR_INLINE bytes or more that finds nothing queued on its
    fd first goes out with send(2) inside the call, and only what the socket
    doesn't take is copied. A ring is a number to Goose, the address of its
    struct ur, and belongs to the thread that created it
@@ -33,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 _Static_assert(ENOBUFS == 105 && ECANCELED == 125, "errno values differ from src/ring.goose");
@@ -105,8 +107,23 @@ struct ur_send {
     struct ur_pipe *pipe;
     int64_t foff, fleft;    /* what's left of the file to put in the pipe */
     uint32_t piped;         /* bytes in the pipe, still to send */
+    /* A gathered send (ur_send_shared) has its bytes in claim, and data
+       holds its sendmsg's header and vector (ur_gather_of). */
+    struct shared_claim *claim;
     unsigned char data[];
 };
+
+/* A gathered send's sendmsg: up to UR_IOV of its claim's runs at a time,
+   in its record's data, which stays put until the send's last completion. */
+#define UR_IOV 64
+struct ur_gather {
+    struct msghdr m;
+    struct iovec v[UR_IOV];
+};
+static struct ur_gather *ur_gather_of(struct ur_send *s) {
+    return (struct ur_gather *)(((uintptr_t)s->data + 15) & ~(uintptr_t)15);
+}
+#define UR_GATHER_CAP (sizeof(struct ur_gather) + 15)
 
 /* A pipe, which a file's send holds while it lasts. Empty ones are kept for
    the next file. */
@@ -171,6 +188,7 @@ void urp_accept(int64_t h, int32_t fd, uint64_t tag);
 void urp_recv(int64_t h, int32_t fd, uint64_t tag);
 int32_t urp_send(int64_t h, int32_t fd, uint64_t tag, ur_bytes data);
 int32_t urp_send_file(int64_t h, int32_t fd, uint64_t tag, int64_t file, int64_t off, int64_t len);
+int32_t urp_send_shared(int64_t h, int32_t fd, uint64_t tag, ur_bytes data);
 void urp_cancel(int64_t h, uint64_t tag);
 void urp_close(int64_t h, int32_t fd, uint64_t recv);
 void urp_take(int64_t h, int32_t buf, int64_t off, ur_bytes dst);
@@ -179,6 +197,12 @@ int32_t urp_wait(int64_t h, ur_completions out, int32_t timeout_ms);
 void urp_destroy(int64_t h);
 int64_t urp_waker(int64_t h, uint64_t tag);
 int32_t urp_listeners(void);
+
+/* From shim/shared.c: a gathered send's claim on its bytes. */
+struct shared_claim *shared_claim_take(const uint8_t *data, int64_t len);
+int64_t shared_claim_len(const struct shared_claim *c);
+int32_t shared_claim_iov(const struct shared_claim *c, int64_t off, struct iovec *v, int32_t max);
+void shared_claim_free(struct shared_claim *c);
 
 /* ur_create's flags, ring.goose's RING_EMULATE and RING_REQUIRE. */
 #define UR_EMULATE 1
@@ -291,7 +315,11 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
    socket, or a no-op to report err. */
 static void ur_prep_send(struct ur *u, struct ur_send *s) {
     struct io_uring_sqe *sqe = ur_sqe(u);
-    if (s->file < 0) {
+    if (s->claim) {
+        struct ur_gather *g = ur_gather_of(s);
+        g->m = (struct msghdr){ .msg_iov = g->v, .msg_iovlen = (size_t)shared_claim_iov(s->claim, s->off, g->v, UR_IOV) };
+        io_uring_prep_sendmsg(sqe, s->fd, &g->m, MSG_NOSIGNAL);
+    } else if (s->file < 0) {
         io_uring_prep_send(sqe, s->fd, s->data + s->off, s->len - s->off, MSG_NOSIGNAL);
     } else if (s->err) {
         io_uring_prep_nop(sqe);
@@ -342,7 +370,7 @@ int32_t ur_send(int64_t h, int32_t fd, uint64_t tag, ur_bytes data) {
     struct ur_fd *f = ur_fd_of(u, fd);
     if (!f) return -ENOMEM;
     s = f->last;
-    if (s && s != f->head && s->file < 0 && s->cap - s->len >= data.len) {
+    if (s && s != f->head && s->file < 0 && !s->claim && s->cap - s->len >= data.len) {
         memcpy(s->data + s->len, data.data, (size_t)data.len);
         s->len += (uint32_t)data.len;
         return 0;
@@ -399,7 +427,49 @@ int32_t ur_send(int64_t h, int32_t fd, uint64_t tag, ur_bytes data) {
     s->off = 0;
     s->pre = pre;
     s->file = -1;
+    s->claim = NULL;
     memcpy(s->data, data.data, (size_t)data.len);
+    ur_enqueue(u, f, s);
+    return 0;
+}
+
+/* Gathers sends here: ring.goose's ring_gathers. */
+uint8_t ur_gathers(int64_t h) {
+    (void)h;
+    return 1;
+}
+
+/* Queues a send of data and the ranges shared_defer deferred into it, with
+   one sendmsg a step, behind the sends on fd before it, and takes the
+   ranges' references (shim/shared.c), which the record holds until its last
+   completion. Only data is copied. A short send is queued again for the
+   rest inside ur_wait, as ur_send's is. */
+int32_t ur_send_shared(int64_t h, int32_t fd, uint64_t tag, ur_bytes data) {
+    if (UR_EMULATED(h)) return urp_send_shared(UR_POLL(h), fd, tag, data);
+    struct ur *u = (struct ur *)(intptr_t)h;
+    struct shared_claim *c = shared_claim_take(data.data, data.len);
+    if (!c) return -ENOMEM;
+    struct ur_fd *f = ur_fd_of(u, fd);
+    int k = 0;
+    while ((UR_MIN << k) < (int64_t)UR_GATHER_CAP) k++;
+    struct ur_send *s = NULL;
+    if (f && u->free[k]) {
+        s = u->free[k];
+        u->free[k] = s->next;
+    } else if (f) {
+        s = malloc(sizeof *s + ((size_t)UR_MIN << k));
+        if (s) s->cap = (uint32_t)UR_MIN << k;
+    }
+    if (!s) {
+        shared_claim_free(c);
+        return -ENOMEM;
+    }
+    s->tag = tag;
+    s->fd = fd;
+    s->len = (uint32_t)shared_claim_len(c);
+    s->off = s->pre = 0;
+    s->file = -1;
+    s->claim = c;
     ur_enqueue(u, f, s);
     return 0;
 }
@@ -471,6 +541,7 @@ int32_t ur_send_file(int64_t h, int32_t fd, uint64_t tag, int64_t file, int64_t 
     s->tag = tag;
     s->fd = fd;
     s->len = s->off = s->pre = 0;
+    s->claim = NULL;
     s->file = (int32_t)file;
     s->foff = off;
     s->fleft = len;
@@ -526,6 +597,10 @@ static int ur_file_step(struct ur *u, struct ur_send *s, int32_t res, ur_complet
 }
 
 static void ur_send_free(struct ur *u, struct ur_send *s) {
+    if (s->claim) {
+        shared_claim_free(s->claim);
+        s->claim = NULL;
+    }
     if (s->cap <= UR_SMALL) {
         int k = 0;
         while ((UR_MIN << k) < s->cap) k++;
@@ -812,7 +887,8 @@ int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms) {
 
 /* Tears the ring down, with whatever is still queued on it. The records of
    sends in flight aren't freed: only a completion says when the kernel is
-   done with one. Those waiting behind them are. Their files and pipes are
+   done with one, so a gathered one keeps its blobs' references too. Those
+   waiting behind them are freed, and release theirs. Their files and pipes are
    closed, as the kernel holds its own reference to one in use, except those
    of a file's send in flight when ur_close dropped its fd. */
 void ur_destroy(int64_t h) {
@@ -832,6 +908,7 @@ void ur_destroy(int64_t h) {
         for (struct ur_send *s = u->fds[fd].head->next, *next; s; s = next) {
             next = s->next;
             if (s->file >= 0) ur_file_end(u, s);
+            if (s->claim) shared_claim_free(s->claim);
             free(s);
         }
     }

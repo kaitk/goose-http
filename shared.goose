@@ -34,6 +34,13 @@ extern "shared_len" fn shared_len_c(h: i64) -> i64;
 extern "shared_retain" fn shared_retain_c(h: i64, n: i64) -> i32;
 extern "shared_release" fn shared_release_c(h: i64) -> i64;
 extern "shared_append" fn shared_append_c(h: i64, from: i64, to: i64, out: u8[>..]&) -> i32;
+// A loop's gathered sends: shim/shared.c says what each does.
+extern "shared_defer" fn shared_defer_c(h: i64, from: i64, to: i64, at: i64) -> i32;
+extern "shared_gather" fn shared_gather(on: bool);
+extern "shared_settle" fn shared_settle();
+extern "shared_pending" fn shared_pending() -> i64;
+extern "shared_flatten" fn shared_flatten(buf: const u8[:], skip: i64, out: u8[>..]&);
+extern "shared_send" fn shared_send(fd: i32, buf: const u8[:], skip: i64) -> i64;
 
 // Copies data into a new blob with refs references. Returns it, and 0 or
 // -code: EINVAL for refs < 1 or past 2^32 - 1, which a blob's count is
@@ -67,14 +74,17 @@ inline fn shared_append(b: Shared, from: i64, to: i64, out: u8[>..]&) -> bool {
     shared_append_c(b.h, from, to, out) == 0
 }
 
-// Sends b's bytes from..to on an upgraded connection, as send does data,
-// copying them once into the output; after_drain counts them. False, sending
-// nothing, for a range outside b, a handle that isn't a blob's, or a stream
-// that isn't open and upgraded.
+// Sends b's bytes from..to on an upgraded connection, as send does data;
+// after_drain counts them. A loop that gathers (each but Windows', without
+// TLS) keeps a reference until they're sent, and sends them from b with the
+// output; others copy them once into it. False, sending nothing, for a range outside b, a handle that
+// isn't a blob's, or a stream that isn't open and upgraded.
 fn send_shared(out: Reply, b: Shared, from: i64, to: i64) -> bool {
     let s .= out.stream;
     guard s.open && raw(s) else { return false; }
-    guard shared_append_c(b.h, from, to, out.buf) == 0 else { return false; }
+    let deferred = shared_defer_c(b.h, from, to, out.buf.len);
+    guard deferred >= 0 else { return false; }
+    if deferred == 0 { guard shared_append_c(b.h, from, to, out.buf) == 0 else { return false; } }
     if to > from { s.moved = true; }
     return true;
 }

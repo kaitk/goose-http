@@ -26,6 +26,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#ifndef _WIN32
+#include <errno.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#endif
 
 #include "goose.h"
 
@@ -198,3 +203,199 @@ int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
     shared_release(h);
     return r;
 }
+
+/* Gathered sends, on a loop's thread: while the loop turns gathering on for
+   a connection, shared_defer records a blob's range at an offset into the
+   loop's write buffer, retained, instead of copying it there. epoll's loop
+   sends the buffer and the ranges with one sendmsg, and what the socket
+   doesn't take, shared_flatten copies out; either way shared_settle
+   releases the ranges. A ring's loop hands the buffer and the ranges to its
+   send as a claim (shared_claim_take), which the ring frees once the bytes
+   have gone or the connection closed. The loops gather only while they
+   drive a connection, and settle or hand on every range before the turn
+   ends, so none outlives the connection it was deferred on. A piece's
+   reference keeps its bytes, d, in place until its release. */
+typedef struct { int64_t at; int64_t h; const uint8_t *d; int64_t n; } shared_piece;
+static _Thread_local struct { shared_piece *p; int64_t n, cap, bytes; int on; } gather;
+
+void shared_settle(void) {
+    for (int64_t i = 0; i < gather.n; i++) shared_release(gather.p[i].h);
+    gather.n = 0;
+    gather.bytes = 0;
+}
+
+/* Settles, then gathers the next turn's ranges if on. */
+void shared_gather(uint8_t on) {
+    shared_settle();
+    gather.on = on;
+}
+
+/* Bytes deferred since the last settle. */
+int64_t shared_pending(void) { return gather.bytes; }
+
+/* Defers bytes [from, to) of the blob at offset at of the write buffer.
+   Returns 1, or 0 when the loop isn't gathering, for the caller to copy, or
+   -EINVAL as shared_append. */
+int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at) {
+    if (gather.on && gather.n == gather.cap) {
+        int64_t cap = gather.cap ? 2 * gather.cap : 64;
+        shared_piece *p = realloc(gather.p, (size_t)cap * sizeof *p);
+        if (p) {
+            gather.p = p;
+            gather.cap = cap;
+        }
+    }
+    /* Not gathering, or out of memory: the caller copies the range. */
+    if (!gather.on || gather.n == gather.cap) {
+        int64_t len = shared_len(h);
+        return len >= 0 && from >= 0 && to >= from && to <= len ? 0 : -SHARED_EINVAL;
+    }
+    shared_slot *s = shared_acquire(h, 1);
+    if (!s) return -SHARED_EINVAL;
+    int64_t len = atomic_load_explicit(&s->len, memory_order_relaxed);
+    if (from < 0 || to < from || to > len || to == from) {
+        shared_release(h);
+        return to == from && from >= 0 && from <= len ? 1 : -SHARED_EINVAL;
+    }
+    gather.p[gather.n++] = (shared_piece){ at, h, atomic_load_explicit(&s->data, memory_order_relaxed) + from, to - from };
+    gather.bytes += to - from;
+    return 1;
+}
+
+/* Calls f for each run of the write buffer buf and the deferred ranges,
+   in order, from offset skip of the whole; stops when f returns 0. */
+static void shared_runs(shared_bytes buf, int64_t skip, int (*f)(void *, const uint8_t *, int64_t), void *arg) {
+    int64_t at = 0;
+    for (int64_t i = 0; i <= gather.n; i++) {
+        int64_t end = i < gather.n ? gather.p[i].at : buf.len;
+        for (int k = 0; k < 2; k++) {
+            const uint8_t *d; int64_t n;
+            if (k == 0) { d = buf.data + at; n = end - at; at = end; }
+            else if (i < gather.n) { d = gather.p[i].d; n = gather.p[i].n; }
+            else break;
+            if (skip >= n) { skip -= n; continue; }
+            if (!f(arg, d + skip, n - skip)) return;
+            skip = 0;
+        }
+    }
+}
+
+static int shared_copy_run(void *out, const uint8_t *d, int64_t n) {
+    gs_bld_append(*(gs_rref *)out, d, n);
+    return 1;
+}
+
+/* Appends the write buffer and deferred ranges from offset skip of the
+   whole to out, then settles. */
+void shared_flatten(shared_bytes buf, int64_t skip, gs_rref out) {
+    shared_runs(buf, skip, shared_copy_run, &out);
+    shared_settle();
+}
+
+/* A ring's gathered send (shim/uring.c, shim/ring_epoll.c), which outlives
+   the call that queued it: a copy of the write buffer, and the deferred
+   ranges' references, moved from the loop's list, all in one allocation.
+   runs, in order, point into the copy and the blobs. shared_claim_free
+   releases the references once the ring is done with the bytes. */
+typedef struct { const uint8_t *d; int64_t n; } shared_run;
+typedef struct shared_claim {
+    int64_t len;
+    int64_t nruns, nrefs;
+    int64_t *refs;          /* the ranges' handles */
+    shared_run runs[];
+} shared_claim;
+
+static int shared_claim_run(void *arg, const uint8_t *d, int64_t n) {
+    shared_claim *c = arg;
+    if (n > 0) c->runs[c->nruns++] = (shared_run){ d, n };
+    return 1;
+}
+
+/* Takes the write buffer, len bytes at data, and the deferred ranges into a claim, leaving
+   none deferred. NULL when out of memory, with the ranges settled. */
+shared_claim *shared_claim_take(const uint8_t *data, int64_t len) {
+    int64_t n = gather.n;
+    size_t runs = (size_t)(2 * n + 1);
+    shared_claim *c = malloc(sizeof *c + runs * sizeof(shared_run) + (size_t)n * sizeof(int64_t) + (size_t)len);
+    if (!c) {
+        shared_settle();
+        return NULL;
+    }
+    c->refs = (int64_t *)(void *)(c->runs + runs);
+    uint8_t *copy = (uint8_t *)(c->refs + n);
+    if (len) memcpy(copy, data, (size_t)len);
+    c->len = len + gather.bytes;
+    c->nruns = 0;
+    shared_runs((shared_bytes){ copy, len }, 0, shared_claim_run, c);
+    for (int64_t i = 0; i < n; i++) c->refs[i] = gather.p[i].h;
+    c->nrefs = n;
+    gather.n = 0;
+    gather.bytes = 0;
+    return c;
+}
+
+int64_t shared_claim_len(const shared_claim *c) { return c->len; }
+
+/* Releases the claim's references, and frees it. */
+void shared_claim_free(shared_claim *c) {
+    for (int64_t i = 0; i < c->nrefs; i++) shared_release(c->refs[i]);
+    free(c);
+}
+
+#ifndef _WIN32
+#define SHARED_IOV 64
+typedef struct { struct iovec v[SHARED_IOV]; int n; } shared_iovs;
+
+/* Fills v with up to max runs of the claim from offset off. Returns how
+   many. */
+int32_t shared_claim_iov(const shared_claim *c, int64_t off, struct iovec *v, int32_t max) {
+    int32_t k = 0;
+    for (int64_t i = 0; i < c->nruns && k < max; i++) {
+        int64_t n = c->runs[i].n;
+        if (off >= n) {
+            off -= n;
+            continue;
+        }
+        v[k++] = (struct iovec){ (void *)(c->runs[i].d + off), (size_t)(n - off) };
+        off = 0;
+    }
+    return k;
+}
+
+/* Maps a failed send's errno to the Linux numbers the loops tell apart
+   (sys.goose). */
+static int64_t shared_send_err(void) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return -11;
+    if (errno == EINTR) return -4;
+    return -32;
+}
+
+/* Sends the claim from offset off on socket fd, in one sendmsg of up to 64
+   runs. Returns the bytes sent, or -errno as shared_send. */
+int64_t shared_claim_send(int32_t fd, const shared_claim *c, int64_t off) {
+    struct iovec v[SHARED_IOV];
+    struct msghdr m = { .msg_iov = v, .msg_iovlen = (size_t)shared_claim_iov(c, off, v, SHARED_IOV) };
+    ssize_t r = sendmsg(fd, &m, MSG_NOSIGNAL);
+    return r >= 0 ? r : shared_send_err();
+}
+
+static int shared_iov_run(void *arg, const uint8_t *d, int64_t n) {
+    shared_iovs *iov = arg;
+    if (n == 0) return 1;
+    iov->v[iov->n++] = (struct iovec){ (void *)d, (size_t)n };
+    return iov->n < SHARED_IOV;
+}
+
+/* Sends what follows offset skip of the write buffer and deferred ranges on
+   socket fd, in one sendmsg of up to 64 runs. Returns the bytes sent, or
+   -errno. */
+int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) {
+    shared_iovs iov = { .n = 0 };
+    shared_runs(buf, skip, shared_iov_run, &iov);
+    struct msghdr m = { .msg_iov = iov.v, .msg_iovlen = (size_t)iov.n };
+    ssize_t r = sendmsg(fd, &m, MSG_NOSIGNAL);
+    return r >= 0 ? r : shared_send_err();
+}
+#else
+int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) { (void)fd; (void)buf; (void)skip; return -38; }
+#endif
