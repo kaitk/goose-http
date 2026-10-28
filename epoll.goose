@@ -30,6 +30,7 @@ struct EpollConn<S> {
     watch_out: bool,    // OUT is registered: set while out holds bytes
     ready: bool,        // another turn is owed for reads or an upgraded drain credit
     listed: bool,       // in turns
+    empty: bool = false, // a recv found the socket empty, and no edge came since
     h2: i32 = -1,       // an h2 connection's H2Conn, in the worker's pool; -1 for HTTP/1.1,
                         // and -2 for HTTP/1.1 that a TLS handshake's ALPN chose
     tls: i32 = -1,      // a TLS connection's slot in the TlsServer (http.tls); -1 for none
@@ -504,14 +505,21 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 }
                 continue;
             }
+            // A WAKE that finds the socket as the last recv left it reads nothing: the
+            // next byte or close raises an edge, which clears empty.
+            if c.empty { return wait(c, progress); }
             let r = if c.state == DRAINING { net_recv(c.fd, rbuf) }
                     else { net_recv(c.fd, rbuf[rlen..]) };
-            if r == -EAGAIN { return wait(c, progress); }
+            if r == -EAGAIN {
+                c.empty = true;
+                return wait(c, progress);
+            }
             if r == -EINTR { continue; }
             guard r > 0 else { return false; }   // the client closed or reset
             got += r;
             if c.state == OPEN { rlen += r; }
             drained = r < room && !hup;
+            c.empty = drained;
         }
     }
 
@@ -734,6 +742,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             let i = ev.tag as i64;
             // A WAKE earlier in the batch may have closed it.
             if conns[i].fd < 0 { continue; }
+            conns[i].empty = false;
             go(i, ev.events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR) != 0, none);
         }
         // One more turn each for the connections listed so far, after this
