@@ -4,7 +4,10 @@
 // or the loop had to keep the rest (/large, behind a stalled reader). LOOP
 // picks the loop: epoll, uring (io_uring, required), emulated (the ring's
 // emulation), or serve's own choice otherwise. With GATHERS=1 the loop must
-// hold a reference for each range until it sends it, not copy it.
+// hold a reference for each range until it sends it, not copy it. /copy
+// sends through a Reply with a buffer of the handler's own, which the loop
+// copies into, and /echo defers a piece for each frame the client sends,
+// which the loop must send once a write buffer's worth is deferred.
 import std;
 import os;
 import http from "../../";
@@ -13,12 +16,15 @@ import http.websocket;
 import http.shared;
 
 struct State { ws: http::WebSocket = http::WebSocket { .. }, blob: http::Shared = http::Shared { .. }, done: bool = false,
-               gathers: bool = false }
+               gathers: bool = false, echo: bool = false, pieces: i64 = 0 }
+
+let PIECES: i64 = 64;
 
 fn handle(ev: http::Event, state: State&, out: http::Reply) {
     if ev.kind == http::REQUEST {
         guard http::ws_upgrade(ev.req, state.ws, out) else { return; }
         let n = if ev.req.target == "/large" { 4 << 20 } else { 4096 };
+        let copy = ev.req.target == "/copy";
         var bytes: u8[>..] = [];
         for i in n { bytes.push((i * 7 % 251) as! u8); }
         let b, err = http::shared_put(bytes, 1);
@@ -27,6 +33,24 @@ fn handle(ev: http::Event, state: State&, out: http::Reply) {
         assert(http::shared_retain(b, 1));
         state.blob = b;
         http::send(out, "<");
+        if ev.req.target == "/echo" {
+            state.echo = true;
+            assert(http::shared_release(b) == 1);
+            return;
+        }
+        if copy {
+            var mine: u8[>..] = [];
+            let own = http::Reply { buf: mine, common: out.common, keep_alive: out.keep_alive, minor: out.minor,
+                                    head: out.head, stream: out.stream, fd: out.fd };
+            assert(http::send_shared(own, b, 0, 1000));
+            http::send(own, "|");
+            assert(http::send_shared(own, b, 1000, n));
+            http::send(out, mine);
+            http::send(out, ">");
+            assert(http::shared_release(b) == 1);
+            assert(http::after_drain(out));
+            return;
+        }
         assert(http::send_shared(out, b, 0, 1000));
         http::send(out, "|");
         assert(http::send_shared(out, b, 1000, n));
@@ -36,6 +60,20 @@ fn handle(ev: http::Event, state: State&, out: http::Reply) {
         let left = http::shared_release(b);
         assert(left == (if state.gathers { 3 } else { 1 }));
         assert(http::after_drain(out));
+    } else if ev.kind == http::BODY && state.echo && !state.done {
+        // Before each piece of the client's bytes, what was deferred counts
+        // toward the write buffer, so the loop has sent it once it filled one.
+        assert(http::shared_pending() < 8192);
+        http::ws_read(ev, state.ws, out) { op, data, reply =>
+            if state.pieces < PIECES {
+                assert(http::send_shared(reply, state.blob, 0, 4096));
+                state.pieces++;
+                if state.pieces == PIECES {
+                    http::send(reply, ">");
+                    assert(http::after_drain(reply));
+                }
+            }
+        };
     } else if ev.kind == http::DRAINED && !state.done {
         state.done = true;
         assert(http::shared_release(state.blob) == 0);

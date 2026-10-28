@@ -450,9 +450,9 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     // while handlers answer here: pump flushes them all before it returns.
     fn feed(c: RingConn<S>&, buf: i32, src: const u8[:], n: i64, wake: const Event&) {
         if c.h2 >= 0 { pump_h2(c, buf, src, n, wake); return; }
-        shared_gather(gathers && c.tls < 0);
+        shared_gather(gathers && c.tls < 0, wbuf);
         pump(c, buf, src, n, wake);
-        shared_gather(false);
+        shared_gather(false, wbuf);
     }
 
     // Goes on with c's exchange, which waited, with ev, its WAKE or TIMEOUT,

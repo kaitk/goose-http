@@ -1207,6 +1207,36 @@ Rejected: a bare spinlock (the first version); and a spinlock with `pause`, a bo
 spin then a yield, and chunks allocated outside the lock, which keeps a fast path no
 profile asked for, at a couple of lock operations per published message.
 
+## Shared ranges go out from their blobs
+
+Decided 2026-10-28, for Campfire's cable fan-out.
+
+`send_shared` on a plain socket doesn't copy the range into the output. The loop records
+it, retained, at its offset in the write buffer, and sends the buffer and the ranges
+together: one `sendmsg` of up to 64 runs on epoll, and a ring send that holds the
+ranges' references until its completion, or the connection's close, on io_uring and
+the emulated ring. Only what the socket doesn't take is copied, into the connection's
+pending output, as before.
+
+- The loop names its write buffer when it gathers, and `shared_defer` defers only into
+  that buffer: a handler that builds a `Reply` around a buffer of its own, as Campfire
+  does for a deferred POST, gets the range copied there. h2 and TLS output, which go
+  through other buffers or need contiguous plaintext, copy.
+- Deferred bytes count toward `Config.write_buffer` before each body piece and `MORE`,
+  so a handler that defers at each `MORE` is flushed as one that copies is.
+- Gathering is on only while a loop drives a connection, and every range is settled or
+  handed to a ring send before the turn ends, so none outlives its connection.
+- Traffic that never calls `send_shared` pays a thread-local load before each body piece
+  and `MORE`, and the epoll loop's `shared_pending` checks around a send.
+
+Why: each of Campfire's readers copied every message body into its output. Sent from the
+blob, its 64-reader fan-out rose 19% with 11% less CPU per message (M1, Docker's arm64 VM,
+3 rotated rounds), and with its per-worker delivery 4,177 against 3,796 messages a second.
+
+Rejected: deferring into any `Reply`'s buffer by offset, the first version, which put the
+ranges in the loop's output at another buffer's offsets when a handler's buffer wasn't
+the loop's. `MSG_ZEROCOPY` wasn't tried.
+
 ## Not yet decided
 
 ### Compression in an optional module

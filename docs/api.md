@@ -547,7 +547,12 @@ http::shared_release(b);
 - `http::send_shared(out, b, from, to)` sends a range on an upgraded connection, as
   `http::send` does, and `after_drain` counts it. False, sending nothing, for a range
   outside the blob, a handle that isn't a blob's, or a stream that isn't open and
-  upgraded.
+  upgraded. The epoll loop and both rings send the range from the blob, holding a
+  reference until the socket takes it: with the output in one `sendmsg` on epoll, and
+  in the ring's send. Only what the socket doesn't take is copied. Over TLS, on
+  Windows, and into a `Reply` whose buffer isn't the loop's own, the range is copied
+  into the output. Deferred ranges count toward `Config.write_buffer`
+  ([decision](decisions.md#shared-ranges-go-out-from-their-blobs)).
 - A handle is checked as `handle.goose`'s are: one used after its blob's last
   release, or one never put, is refused, even once its slot holds another blob,
   rather than read. A blob's bytes never change.

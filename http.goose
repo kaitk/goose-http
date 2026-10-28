@@ -28,6 +28,7 @@ import uring;
 import router;
 import file;
 import media;
+import shared;
 import cookie;
 import auth;
 import form;
@@ -449,7 +450,8 @@ let INTERIM = "HTTP/1.1 100 Continue\r\n\r\n";
 // longest head it takes. A request's state starts as fresh, and while
 // stopping, its response closes the connection. Before a
 // request, a piece of a body, or a MORE call, if wbuf holds
-// cfg.write_buffer bytes or more, it calls ROOM(), which empties wbuf and
+// cfg.write_buffer bytes or more, with the shared ranges deferred into it
+// before a piece or a MORE, it calls ROOM(), which empties wbuf and
 // returns true, or returns false to stop there. Returns the bytes left in
 // rbuf, the number of calls to H, and whether ROOM, or a file for the loop
 // to send (Stream.direct), stopped it. A refused
@@ -583,7 +585,9 @@ fn answer<S, H, ROOM, C>(c: C&, rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, common: 
         }
         if x.body != BodyReader.None {
             guard off < rlen else { break; }
-            if wbuf.len >= write_buffer && !ROOM() {
+            // Ranges send_shared deferred count as written: only an upgraded exchange,
+            // which takes BODY and MORE but no new request, defers them.
+            if wbuf.len + shared_pending() >= write_buffer && !ROOM() {
                 full = true;
                 break;
             }
@@ -627,7 +631,7 @@ fn answer<S, H, ROOM, C>(c: C&, rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, common: 
             continue;
         }
         if x.stream.open {
-            if wbuf.len >= write_buffer && !ROOM() {
+            if wbuf.len + shared_pending() >= write_buffer && !ROOM() {
                 full = true;
                 break;
             }

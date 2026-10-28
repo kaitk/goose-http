@@ -17,6 +17,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "goose.h"
+
 typedef struct { uint8_t *data; int64_t len; } bytes;
 typedef struct { uint64_t tag; int32_t res, buf; uint8_t more, send; } __attribute__((packed)) completion;
 typedef struct { completion *data; int64_t len; } completions;
@@ -30,8 +32,8 @@ void ur_destroy(int64_t h);
 int64_t shared_put(bytes data, int64_t refs);
 int32_t shared_retain(int64_t h, int64_t n);
 int64_t shared_release(int64_t h);
-int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at);
-void shared_gather(uint8_t on);
+int32_t shared_defer(int64_t h, int64_t from, int64_t to, gs_rref out);
+void shared_gather(uint8_t on, gs_rref buf);
 int64_t shared_pending(void);
 
 #define N (1 << 20)
@@ -66,9 +68,14 @@ static void run(int64_t h, const char *name) {
     want[1001] = 'b';
     memcpy(want + 1002, data + 1000, N - 1000);
     uint8_t wbuf[] = "ab";
-    shared_gather(1);
-    assert(shared_defer(b, 0, 1000, 1) == 1);
-    assert(shared_defer(b, 1000, N, 2) == 1);
+    /* The loop's write buffer, and another, whose ranges are copied. */
+    gs_rhdr whdr = { wbuf, 1 }, other = { wbuf, 0 };
+    gs_rref w = { &whdr, NULL };
+    shared_gather(1, w);
+    assert(shared_defer(b, 0, 1000, (gs_rref){ &other, NULL }) == 0 && refs(b) == 1);
+    assert(shared_defer(b, 0, 1000, w) == 1);
+    whdr.len = 2;
+    assert(shared_defer(b, 1000, N, w) == 1);
     assert(shared_pending() == N && refs(b) == 3);
     assert(ur_send_shared(h, sv[0], 7, (bytes){ wbuf, 2 }) == 0);
     assert(shared_pending() == 0 && refs(b) == 3);
@@ -91,11 +98,12 @@ static void run(int64_t h, const char *name) {
 
     /* Two sends the peer doesn't read: the first starts and stalls, the
        second waits behind it. A close releases both. */
-    assert(shared_defer(b, 0, N, 0) == 1);
+    whdr.len = 0;
+    assert(shared_defer(b, 0, N, w) == 1);
     assert(ur_send_shared(h, sv[0], 8, (bytes){ wbuf, 0 }) == 0);
-    assert(shared_defer(b, 0, N, 0) == 1);
+    assert(shared_defer(b, 0, N, w) == 1);
     assert(ur_send_shared(h, sv[0], 9, (bytes){ wbuf, 0 }) == 0);
-    shared_gather(0);
+    shared_gather(0, w);
     assert(refs(b) == 3);
     completion c[4];
     assert(ur_wait(h, (completions){ c, 4 }, 50) == 0);

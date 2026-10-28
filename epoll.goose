@@ -321,7 +321,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         wbuf.clear();
         woff = 0;
         // Shared ranges go out from their blobs only on a plain socket.
-        shared_gather(c.tls < 0);
+        shared_gather(c.tls < 0, wbuf);
         if c.out.len > 0 {
             wbuf.append(c.out);
             spill.free_slice(c.out);
@@ -354,7 +354,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         // Gathering ends with the turn: a CLOSED or HTTP/3 handler, outside
         // it, copies into its own output.
         guard going else {
-            shared_gather(false);
+            shared_gather(false, wbuf);
             return false;
         }
         if rlen > 0 {
@@ -370,7 +370,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             c.out = spill.alloc_slice(wbuf.len - woff);
             copy_into(c.out, wbuf[woff..]);
         }
-        shared_gather(false);
+        shared_gather(false, wbuf);
         return true;
     }
 
