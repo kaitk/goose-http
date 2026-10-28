@@ -73,8 +73,15 @@ for loop in ("uring", "emulated", "epoll"):
             assert proc.poll() is None, loop
             print(json.dumps({"loop": loop, "shared_send": "ok"}), flush=True)
         finally:
+            # A stop, not a kill: a killed io_uring server's listener takes
+            # the next server's connections until the kernel tears its ring
+            # down, and resets them (docs/known-issues.md).
             if proc.poll() is None:
-                proc.kill()
+                proc.terminate()
+                try:
+                    proc.wait(10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
             proc.wait()
             log.seek(0)
             out = log.read()
