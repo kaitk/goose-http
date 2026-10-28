@@ -9,6 +9,7 @@ import os;
 import sys;
 import message;
 import h2;
+import shared;
 
 // The epoll tag of Config.port's listener; Config.listeners[k]'s is
 // EPOLL_LISTENER - 2 - k. A connection's is its slot.
@@ -218,6 +219,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var rlen = 0;
     var wbuf: u8[>..] = [];
     var woff = 0;
+    // What of the output, wbuf and the shared ranges deferred into it, the socket didn't take.
+    var gbuf: u8[>..] = [];
     // On a TLS connection, wbuf[..sealed] is sealed for the socket, and what
     // follows is plaintext still to seal.
     var sealed = 0;
@@ -317,6 +320,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
         wbuf.clear();
         woff = 0;
+        // Shared ranges go out from their blobs only on a plain socket.
+        shared_gather(c.tls < 0);
         if c.out.len > 0 {
             wbuf.append(c.out);
             spill.free_slice(c.out);
@@ -351,7 +356,12 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             c.held = spill.alloc_slice(rlen);
             copy_into(c.held, rbuf[..rlen]);
         }
-        if woff < wbuf.len {
+        if shared_pending() > 0 {
+            gbuf.clear();
+            shared_flatten(wbuf, woff, gbuf);
+            c.out = spill.alloc_slice(gbuf.len);
+            copy_into(c.out, gbuf);
+        } else if woff < wbuf.len {
             c.out = spill.alloc_slice(wbuf.len - woff);
             copy_into(c.out, wbuf[woff..]);
         }
@@ -407,8 +417,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 guard tls_seal(tls, c.tls, wbuf, sealed, c.state == CLOSING) else { return false; }
                 sealed = wbuf.len;
             }
-            while woff < wbuf.len {
-                let w = net_send(c.fd, wbuf[woff..]);
+            while woff < wbuf.len + shared_pending() {
+                let w = if shared_pending() > 0 { shared_send(c.fd, wbuf, woff) } else { net_send(c.fd, wbuf[woff..]) };
                 if w == -EAGAIN { return wait(c, progress); }
                 if w == -EINTR { continue; }
                 guard w > 0 else { return false; }   // EPIPE, ECONNRESET: the client left
@@ -418,6 +428,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             wbuf.clear();
             woff = 0;
             sealed = 0;
+            shared_settle();
             if c.x.stream.framing == Framing.RawDrain && c.state == OPEN && c.x.stream.open {
                 // One credit per turn keeps a publisher with a fast reader
                 // from delaying other sockets, mail, and the timer sweep.

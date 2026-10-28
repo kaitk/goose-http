@@ -17,6 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#ifndef _WIN32
+#include <errno.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#endif
 
 #include "goose.h"
 
@@ -87,3 +92,107 @@ int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
     gs_bld_append(out, b->data + from, to - from);
     return 0;
 }
+
+/* Gathered sends, on a loop's thread: while the loop turns gathering on for
+   a connection, shared_defer records a blob's range at an offset into the
+   loop's write buffer, retained, instead of copying it there, and the loop
+   sends the buffer and the ranges with one sendmsg. What the socket doesn't
+   take, shared_flatten copies out. Either way shared_settle releases the
+   ranges; the loop settles before each connection's turn, so none outlives
+   the connection it was deferred on. */
+typedef struct { int64_t at; shared_blob *b; int64_t from, to; } shared_piece;
+static _Thread_local struct { shared_piece *p; int64_t n, cap, bytes; int on; } gather;
+
+void shared_settle(void) {
+    for (int64_t i = 0; i < gather.n; i++) shared_release((int64_t)(intptr_t)gather.p[i].b);
+    gather.n = 0;
+    gather.bytes = 0;
+}
+
+/* Settles, then gathers the next turn's ranges if on. */
+void shared_gather(int32_t on) {
+    shared_settle();
+    gather.on = on;
+}
+
+/* Bytes deferred since the last settle. */
+int64_t shared_pending(void) { return gather.bytes; }
+
+/* Defers bytes [from, to) of the blob at offset at of the write buffer.
+   Returns 1, or 0 when the loop isn't gathering, for the caller to copy, or
+   -EINVAL as shared_append. */
+int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at) {
+    shared_blob *b = shared_of(h);
+    if (!b || from < 0 || to < from || to > b->len) return -SHARED_EINVAL;
+    if (!gather.on) return 0;
+    if (to == from) return 1;
+    if (gather.n == gather.cap) {
+        int64_t cap = gather.cap ? 2 * gather.cap : 64;
+        shared_piece *p = realloc(gather.p, (size_t)cap * sizeof *p);
+        if (!p) return 0;
+        gather.p = p; gather.cap = cap;
+    }
+    atomic_fetch_add_explicit(&b->refs, 1, memory_order_relaxed);
+    gather.p[gather.n++] = (shared_piece){ at, b, from, to };
+    gather.bytes += to - from;
+    return 1;
+}
+
+/* Calls f for each run of the write buffer buf and the deferred ranges,
+   in order, from offset skip of the whole; stops when f returns 0. */
+static void shared_runs(shared_bytes buf, int64_t skip, int (*f)(void *, const uint8_t *, int64_t), void *arg) {
+    int64_t at = 0;
+    for (int64_t i = 0; i <= gather.n; i++) {
+        int64_t end = i < gather.n ? gather.p[i].at : buf.len;
+        for (int k = 0; k < 2; k++) {
+            const uint8_t *d; int64_t n;
+            if (k == 0) { d = buf.data + at; n = end - at; at = end; }
+            else if (i < gather.n) { d = gather.p[i].b->data + gather.p[i].from; n = gather.p[i].to - gather.p[i].from; }
+            else break;
+            if (skip >= n) { skip -= n; continue; }
+            if (!f(arg, d + skip, n - skip)) return;
+            skip = 0;
+        }
+    }
+}
+
+static int shared_copy_run(void *out, const uint8_t *d, int64_t n) {
+    gs_bld_append(*(gs_rref *)out, d, n);
+    return 1;
+}
+
+/* Appends the write buffer and deferred ranges from offset skip of the
+   whole to out, then settles. */
+void shared_flatten(shared_bytes buf, int64_t skip, gs_rref out) {
+    shared_runs(buf, skip, shared_copy_run, &out);
+    shared_settle();
+}
+
+#ifndef _WIN32
+#define SHARED_IOV 64
+typedef struct { struct iovec v[SHARED_IOV]; int n; } shared_iovs;
+
+static int shared_iov_run(void *arg, const uint8_t *d, int64_t n) {
+    shared_iovs *iov = arg;
+    if (n == 0) return 1;
+    iov->v[iov->n++] = (struct iovec){ (void *)d, (size_t)n };
+    return iov->n < SHARED_IOV;
+}
+
+/* Sends what follows offset skip of the write buffer and deferred ranges on
+   socket fd, in one sendmsg of up to 64 runs. Returns the bytes sent, or
+   -errno. */
+int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) {
+    shared_iovs iov = { .n = 0 };
+    shared_runs(buf, skip, shared_iov_run, &iov);
+    struct msghdr m = { .msg_iov = iov.v, .msg_iovlen = (size_t)iov.n };
+    ssize_t r = sendmsg(fd, &m, MSG_NOSIGNAL);
+    if (r >= 0) return r;
+    /* The loops tell only these apart, by their Linux numbers (sys.goose). */
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return -11;
+    if (errno == EINTR) return -4;
+    return -32;
+}
+#else
+int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) { (void)fd; (void)buf; (void)skip; return -38; }
+#endif
