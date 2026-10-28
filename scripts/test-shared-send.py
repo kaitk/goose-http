@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """send_shared through each loop: every byte in order, from a prompt and a stalled reader,
-and a client that leaves with the rest unsent. Each loop gathers: it holds the ranges'
+and a client that leaves with the rest unsent; through a handler's own buffer, which copies; and a
+piece for each of the client's frames, which the loop sends once a write buffer's worth is
+deferred. Each loop gathers: it holds the ranges'
 references until it sends them (GATHERS=1, which the fixture asserts). LOOP=uring needs
 io_uring, and is skipped where the fixture finds none, as on macOS or under Docker's
 default seccomp profile."""
@@ -14,8 +16,10 @@ import tempfile
 import time
 
 
-def expected(n):
+def expected(n, path=""):
     blob = bytes(i * 7 % 251 for i in range(n))
+    if path == "/echo":
+        return b"<" + blob * 64 + b">!"
     return b"<" + blob[:1000] + b"|" + blob[1000:] + b">!"
 
 
@@ -36,6 +40,10 @@ def fetch(port, path, stall, n):
         assert part, head
         head += part
     assert head.startswith(b"HTTP/1.1 101"), head
+    if path == "/echo":
+        # 64 masked text frames of 1000 bytes, in one write: more than one read's worth.
+        frame = b"\x81\xfe\x03\xe8" + b"\x00" * 4 + b"x" * 1000
+        sock.sendall(frame * 64)
     # A stalled reader leaves the loop the rest of the output to keep.
     time.sleep(stall)
     data = bytearray()
@@ -68,8 +76,9 @@ for loop in ("uring", "emulated", "epoll"):
                 continue
             # The third client leaves after one byte, with most of its 4 MiB unsent.
             for path, stall, n in (("/small", 0, 4096), ("/large", .5, 4 << 20), ("/large", -1, 0),
-                                   ("/small", 0, 4096), ("/large", 0, 4 << 20)):
-                want = expected(n)
+                                   ("/small", 0, 4096), ("/large", 0, 4 << 20), ("/copy", 0, 4096),
+                                   ("/echo", 0, 4096), ("/echo", .5, 4096)):
+                want = expected(n, path)
                 got = fetch(PORTS[loop], path, max(stall, 0), 1 if stall < 0 else len(want))
                 assert got == want[:len(got)], (loop, path)
             time.sleep(.2)

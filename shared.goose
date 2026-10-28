@@ -35,8 +35,8 @@ extern "shared_retain" fn shared_retain_c(h: i64, n: i64) -> i32;
 extern "shared_release" fn shared_release_c(h: i64) -> i64;
 extern "shared_append" fn shared_append_c(h: i64, from: i64, to: i64, out: u8[>..]&) -> i32;
 // A loop's gathered sends: shim/shared.c says what each does.
-extern "shared_defer" fn shared_defer_c(h: i64, from: i64, to: i64, at: i64) -> i32;
-extern "shared_gather" fn shared_gather(on: bool);
+extern "shared_defer" fn shared_defer_c(h: i64, from: i64, to: i64, out: u8[>..]&) -> i32;
+extern "shared_gather" fn shared_gather(on: bool, buf: u8[>..]&);
 extern "shared_settle" fn shared_settle();
 extern "shared_pending" fn shared_pending() -> i64;
 extern "shared_flatten" fn shared_flatten(buf: const u8[:], skip: i64, out: u8[>..]&);
@@ -82,7 +82,7 @@ inline fn shared_append(b: Shared, from: i64, to: i64, out: u8[>..]&) -> bool {
 fn send_shared(out: Reply, b: Shared, from: i64, to: i64) -> bool {
     let s .= out.stream;
     guard s.open && raw(s) else { return false; }
-    let deferred = shared_defer_c(b.h, from, to, out.buf.len);
+    let deferred = shared_defer_c(b.h, from, to, out.buf);
     guard deferred >= 0 else { return false; }
     if deferred == 0 { guard shared_append_c(b.h, from, to, out.buf) == 0 else { return false; } }
     if to > from { s.moved = true; }

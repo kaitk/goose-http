@@ -135,6 +135,16 @@ with `ECONNRESET` or `ECONNREFUSED` in 11 of 40 runs in an arm64 Linux container
 io_uring (kernel 7.0, Docker Desktop on macOS): `waitpid` returned with the uring
 server's listener still in `/proc/net/tcp`, for 2 to 6 ms (2026-10-23).
 
+### A ring torn down with a gathered send in flight keeps its blobs' references
+
+`ur_destroy` (`shim/uring.c`) doesn't free the sends io_uring still has in flight: only a
+completion says when the kernel is done with their bytes. A gathered send among them
+(`send_shared` on io_uring) keeps its shared blobs' references, so those blobs are never
+freed. The ring is torn down only as its loop ends, so a process that stops leaks
+nothing that outlives it; a program that runs a loop again in the same process keeps
+those blobs. The emulated ring sends synchronously and frees every queued send at
+teardown (2026-10-28).
+
 ## Benchmarks
 
 - When V fails to compile the C it generated, it downloads a V release and retries with

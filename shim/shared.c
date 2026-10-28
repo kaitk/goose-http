@@ -206,7 +206,9 @@ int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
 
 /* Gathered sends, on a loop's thread: while the loop turns gathering on for
    a connection, shared_defer records a blob's range at an offset into the
-   loop's write buffer, retained, instead of copying it there. epoll's loop
+   loop's write buffer, retained, instead of copying it there. The loop names
+   its write buffer when it turns gathering on, and a range sent to any other
+   buffer, such as a handler's own, is copied into it as before. epoll's loop
    sends the buffer and the ranges with one sendmsg, and what the socket
    doesn't take, shared_flatten copies out; either way shared_settle
    releases the ranges. A ring's loop hands the buffer and the ranges to its
@@ -216,7 +218,7 @@ int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
    ends, so none outlives the connection it was deferred on. A piece's
    reference keeps its bytes, d, in place until its release. */
 typedef struct { int64_t at; int64_t h; const uint8_t *d; int64_t n; } shared_piece;
-static _Thread_local struct { shared_piece *p; int64_t n, cap, bytes; int on; } gather;
+static _Thread_local struct { shared_piece *p; int64_t n, cap, bytes; const gs_rhdr *buf; } gather;
 
 void shared_settle(void) {
     for (int64_t i = 0; i < gather.n; i++) shared_release(gather.p[i].h);
@@ -224,20 +226,22 @@ void shared_settle(void) {
     gather.bytes = 0;
 }
 
-/* Settles, then gathers the next turn's ranges if on. */
-void shared_gather(uint8_t on) {
+/* Settles, then gathers the next turn's ranges into buf, the loop's write
+   buffer, if on. */
+void shared_gather(uint8_t on, gs_rref buf) {
     shared_settle();
-    gather.on = on;
+    gather.buf = on ? buf.hdr : NULL;
 }
 
 /* Bytes deferred since the last settle. */
 int64_t shared_pending(void) { return gather.bytes; }
 
-/* Defers bytes [from, to) of the blob at offset at of the write buffer.
-   Returns 1, or 0 when the loop isn't gathering, for the caller to copy, or
-   -EINVAL as shared_append. */
-int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at) {
-    if (gather.on && gather.n == gather.cap) {
+/* Defers bytes [from, to) of the blob at the end of out, the loop's write
+   buffer. Returns 1, or 0 when the loop isn't gathering into out, for the
+   caller to copy, or -EINVAL as shared_append. */
+int32_t shared_defer(int64_t h, int64_t from, int64_t to, gs_rref out) {
+    int on = gather.buf && out.hdr == gather.buf;
+    if (on && gather.n == gather.cap) {
         int64_t cap = gather.cap ? 2 * gather.cap : 64;
         shared_piece *p = realloc(gather.p, (size_t)cap * sizeof *p);
         if (p) {
@@ -245,8 +249,8 @@ int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at) {
             gather.cap = cap;
         }
     }
-    /* Not gathering, or out of memory: the caller copies the range. */
-    if (!gather.on || gather.n == gather.cap) {
+    /* Not gathering into out, or out of memory: the caller copies the range. */
+    if (!on || gather.n == gather.cap) {
         int64_t len = shared_len(h);
         return len >= 0 && from >= 0 && to >= from && to <= len ? 0 : -SHARED_EINVAL;
     }
@@ -257,7 +261,7 @@ int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at) {
         shared_release(h);
         return to == from && from >= 0 && from <= len ? 1 : -SHARED_EINVAL;
     }
-    gather.p[gather.n++] = (shared_piece){ at, h, atomic_load_explicit(&s->data, memory_order_relaxed) + from, to - from };
+    gather.p[gather.n++] = (shared_piece){ out.hdr->len, h, atomic_load_explicit(&s->data, memory_order_relaxed) + from, to - from };
     gather.bytes += to - from;
     return 1;
 }

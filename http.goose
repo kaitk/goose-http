@@ -28,6 +28,7 @@ import uring;
 import router;
 import file;
 import media;
+import shared;
 import cookie;
 import auth;
 import form;
@@ -263,6 +264,9 @@ let TIMEOUT: u8 = 7;
 // after_drain's output reached the socket. The exchange's mailbox wait, if
 // any, remains armed. CLOSED replaces this event if the connection fails.
 let DRAINED: u8 = 8;
+// Mail to the worker's own address (worker_address): ev.data and ev.tag are
+// what was sent, and the call belongs to no exchange.
+let WORKER: u8 = 9;
 // TIMEOUT's tag when the exchange found no room to wait, and got it at once.
 let NO_ROOM: i32 = 1;
 // No event, for answer's wake.
@@ -357,8 +361,44 @@ fn holds_input(x) -> bool { return x.stream.waiting && x.body != BodyReader.Raw;
 // table has cfg.max_waiting cells with a box, and none without.
 fn open_waiting(cfg: const Config&, waker: i64) -> Box, Error {
     guard cfg.mail_slots > 0 && cfg.max_waiting > 0 else { return Box { .. }, Error { call: "", code: 0 }; }
-    guard cfg.max_conns <= 1 << 20 else { return Box { .. }, Error { call: "max_conns", code: EINVAL }; }
-    return mail_open(cfg.mail_slots, cfg.mail_size, waker, cfg.max_conns as i32, 44);
+    guard cfg.max_conns < 1 << 20 else { return Box { .. }, Error { call: "max_conns", code: EINVAL }; }
+    // A key for each connection's slot, and the worker's own past them.
+    let b, err = mail_open(cfg.mail_slots, cfg.mail_size, waker, cfg.max_conns as i32 + 1, 44);
+    if err.code == 0 {
+        mail_mark(b, worker_key(cfg), true);
+        wake_box = b.handle;
+    }
+    return b, err;
+}
+
+// The worker's key in its loop's box: the slot past every connection's.
+fn worker_key(cfg: const Config&) -> u64 { (cfg.max_conns as u64) << 44 }
+
+// The address of out's worker itself, for as long as its loop runs: mail to it
+// calls the handler with WORKER, the message's tag and bytes, a state of the
+// worker's own, which starts as fresh, and a reply that sends nothing. A
+// publisher can then address a worker without picking one of its exchanges.
+// cfg is the worker's Config.
+fn worker_address(cfg: const Config&, out: Reply) -> MailAddress {
+    return MailAddress { box: out.stream.later.box, key: worker_key(cfg) };
+}
+
+// A loop's own box, in its thread, and the wakes its handlers asked for: pairs
+// of an exchange's key and a tag, which the loop delivers after its pass.
+var wake_box = Handle { .. };
+var woken: u64[>..] = [];
+
+// Wakes the exchange that waits at to with tag and no bytes, as
+// mail_send(to, tag, "") does. From the worker whose box to is, it takes no
+// slot: the loop calls the exchange after the pass it was asked in. Returns
+// SENT, or STALE for an exchange that doesn't wait; from another thread, what
+// mail_send returns.
+fn wake(to: MailAddress, tag: i32) -> i32 {
+    guard to.box.slot >= 0 && key_of(to.box) == key_of(wake_box) else { return mail_send(to, tag, ""); }
+    guard mail_live(to) else { return STALE; }
+    woken.push(to.key);
+    woken.push(tag as! u32);
+    return SENT;
 }
 
 // mail_open_code (mail.goose), with its error as an Error.
@@ -370,6 +410,8 @@ fn mail_open(slots: i32, size: i32, waker: i64 = 0, live_keys: i32 = 0, key_shif
 // Closes a loop's box, or its waker when it has none, after unlisting the
 // waker for stop.
 fn close_waiting(b: Box, waker: i64) {
+    wake_box = Handle { .. };
+    woken.clear();
     net_stop_unwatch(waker);
     if b.handle.slot >= 0 { mail_close(b); } else { net_waker_close(waker); }
 }
@@ -449,7 +491,8 @@ let INTERIM = "HTTP/1.1 100 Continue\r\n\r\n";
 // longest head it takes. A request's state starts as fresh, and while
 // stopping, its response closes the connection. Before a
 // request, a piece of a body, or a MORE call, if wbuf holds
-// cfg.write_buffer bytes or more, it calls ROOM(), which empties wbuf and
+// cfg.write_buffer bytes or more, with the shared ranges deferred into it
+// before a piece or a MORE, it calls ROOM(), which empties wbuf and
 // returns true, or returns false to stop there. Returns the bytes left in
 // rbuf, the number of calls to H, and whether ROOM, or a file for the loop
 // to send (Stream.direct), stopped it. A refused
@@ -583,7 +626,9 @@ fn answer<S, H, ROOM, C>(c: C&, rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, common: 
         }
         if x.body != BodyReader.None {
             guard off < rlen else { break; }
-            if wbuf.len >= write_buffer && !ROOM() {
+            // Ranges send_shared deferred count as written: only an upgraded exchange,
+            // which takes BODY and MORE but no new request, defers them.
+            if wbuf.len + shared_pending() >= write_buffer && !ROOM() {
                 full = true;
                 break;
             }
@@ -627,7 +672,7 @@ fn answer<S, H, ROOM, C>(c: C&, rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, common: 
             continue;
         }
         if x.stream.open {
-            if wbuf.len >= write_buffer && !ROOM() {
+            if wbuf.len + shared_pending() >= write_buffer && !ROOM() {
                 full = true;
                 break;
             }
