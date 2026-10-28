@@ -1121,6 +1121,20 @@ Rejected: reworking HTTP/3's buffers so its copies are `append`s, which goes aga
 the globals that only grow (above) and changes the stream buffers throughout; and
 waiting for Goose, with static-h3 bound by copies meanwhile.
 
+## Shared blobs' free list behind a mutex, not a spinlock
+
+Shared blobs (`shim/shared.c`) are found through a slot table whose lookups take no lock;
+only the free list does, for a few instructions at a put and at a last release. That lock
+is the platform's mutex, as `mail.c`'s. Uncontended, a mutex and a spinlock each cost one
+atomic. Contended, a program often runs more threads than cores (Campfire runs four
+workers, its broker and a checkpointer on four CPUs), and a spinning waiter whose holder
+was preempted burns its whole time slice; a new chunk's `calloc` and page faults, once
+per 4096 slots, also run under the lock. A mutex sleeps instead.
+
+Rejected: a bare spinlock (the first version); and a spinlock with `pause`, a bounded
+spin then a yield, and chunks allocated outside the lock, which keeps a fast path no
+profile asked for, at a couple of lock operations per published message.
+
 ## Not yet decided
 
 ### Compression in an optional module

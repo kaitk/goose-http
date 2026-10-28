@@ -56,15 +56,28 @@ typedef struct {
 #define SHARED_GEN_MAX 0x7FFFFFFFu
 
 static _Atomic(shared_slot *) shared_chunks[SHARED_CHUNKS];
-static atomic_flag shared_lock = ATOMIC_FLAG_INIT;
 static uint32_t shared_free = SHARED_NONE;     /* under the lock */
 static uint32_t shared_used;                   /* slots ever handed out, under the lock */
 
-static void shared_lock_take(void) {
-    while (atomic_flag_test_and_set_explicit(&shared_lock, memory_order_acquire)) {}
-}
-
-static void shared_lock_drop(void) { atomic_flag_clear_explicit(&shared_lock, memory_order_release); }
+/* The lock guards only the free list: a put and a last release take it for
+   a few instructions, and lookups never do. It's the platform's mutex, as
+   mail.c's, not a spinlock: uncontended both cost one atomic, but a program
+   often runs more threads than cores (Campfire: workers, its broker and a
+   checkpointer on 4 CPUs), where a spinning waiter whose holder was
+   preempted burns its whole time slice, and a new chunk's calloc and page
+   faults (once per 4096 slots) run under the lock. A mutex sleeps instead. */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static SRWLOCK shared_lock = SRWLOCK_INIT;
+static void shared_lock_take(void) { AcquireSRWLockExclusive(&shared_lock); }
+static void shared_lock_drop(void) { ReleaseSRWLockExclusive(&shared_lock); }
+#else
+#include <pthread.h>
+static pthread_mutex_t shared_lock = PTHREAD_MUTEX_INITIALIZER;
+static void shared_lock_take(void) { pthread_mutex_lock(&shared_lock); }
+static void shared_lock_drop(void) { pthread_mutex_unlock(&shared_lock); }
+#endif
 
 static uint32_t shared_next_gen(uint32_t gen) { return gen >= SHARED_GEN_MAX ? 1 : gen + 1; }
 
