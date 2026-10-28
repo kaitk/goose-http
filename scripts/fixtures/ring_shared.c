@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,10 @@ static void run(int64_t h, const char *name) {
     int sv[2], small = 4096;
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     assert(setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof small) == 0);
+    /* As each ring's accepted sockets are: the emulation's non-blocking, for
+       it sends until EAGAIN, and io_uring's blocking, for io_uring would end
+       a send on a non-blocking one with EAGAIN rather than wait. */
+    if (h & 1) assert(fcntl(sv[0], F_SETFL, O_NONBLOCK) == 0);
 
     /* "a", the first 1000 bytes, "b", the rest. */
     want[0] = 'a';
@@ -107,6 +112,8 @@ static void run(int64_t h, const char *name) {
 }
 
 int main(void) {
+    /* A ring that loses bytes can block in a wait: fail, rather than hang. */
+    alarm(60);
     int64_t h = ur_create(64, 8, 4096, 1);
     assert(h > 0);
     run(h, "emulated ring");

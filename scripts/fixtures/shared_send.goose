@@ -71,6 +71,9 @@ fn main() {
         print("no io_uring here");
         return;
     }
-    http::run(http::Config { address: "127.0.0.1", port: 27895, workers: 1,
+    // A port per loop: a stopped io_uring server's listener can outlive it
+    // briefly, and reset the next server's connections.
+    let port: i32 = if name == "uring" { 27897 } else if name == "emulated" { 27896 } else { 27895 };
+    http::run(http::Config { address: "127.0.0.1", port: port, workers: 1,
         max_conns: 8, write_ms: 10000, idle_ms: 10000, .. }, worker);
 }

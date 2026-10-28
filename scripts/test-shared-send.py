@@ -19,11 +19,14 @@ def expected(n):
     return b"<" + blob[:1000] + b"|" + blob[1000:] + b">!"
 
 
-def fetch(path, stall, n):
+PORTS = {"uring": 27897, "emulated": 27896, "epoll": 27895}
+
+
+def fetch(port, path, stall, n):
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16384)
     sock.settimeout(10)
-    sock.connect(("127.0.0.1", 27895))
+    sock.connect(("127.0.0.1", port))
     sock.sendall(f"GET {path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
                  "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".encode())
@@ -52,7 +55,7 @@ for loop in ("uring", "emulated", "epoll"):
         try:
             for _ in range(100):
                 try:
-                    socket.create_connection(("127.0.0.1", 27895), timeout=.1).close()
+                    socket.create_connection(("127.0.0.1", PORTS[loop]), timeout=.1).close()
                     break
                 except OSError:
                     if proc.poll() is not None:
@@ -67,15 +70,12 @@ for loop in ("uring", "emulated", "epoll"):
             for path, stall, n in (("/small", 0, 4096), ("/large", .5, 4 << 20), ("/large", -1, 0),
                                    ("/small", 0, 4096), ("/large", 0, 4 << 20)):
                 want = expected(n)
-                got = fetch(path, max(stall, 0), 1 if stall < 0 else len(want))
+                got = fetch(PORTS[loop], path, max(stall, 0), 1 if stall < 0 else len(want))
                 assert got == want[:len(got)], (loop, path)
             time.sleep(.2)
             assert proc.poll() is None, loop
             print(json.dumps({"loop": loop, "shared_send": "ok"}), flush=True)
         finally:
-            # A stop, not a kill: a killed io_uring server's listener takes
-            # the next server's connections until the kernel tears its ring
-            # down, and resets them (docs/known-issues.md).
             if proc.poll() is None:
                 proc.terminate()
                 try:
