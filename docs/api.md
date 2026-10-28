@@ -479,7 +479,8 @@ else { http::respond(out, 503, "text/plain", "busy"); return; }
   a later send can still return `STALE`. The key stays live through `WAKE` while the
   handler calls `later` again, so a reply can go in pieces back to back; it is
   cleared once the handler returns without waiting, and before `TIMEOUT` or
-  `CLOSED`.
+  `CLOSED`. After an upgrade a `TIMEOUT` is a tick that ends nothing, so the key
+  stays live through it as through `WAKE`.
 - A thread owns a box: `http::mail_open(slots, size)`, which returns the box
   and an `http::Error`, `http::mail_wait(box, ms)`, `http::mail_take(box) { key, tag, bytes => }`. `http::mail_send(address, tag,
   bytes)` returns `SENT`, `FULL` (no slot free), `TOO_LONG` (longer than a slot), or
