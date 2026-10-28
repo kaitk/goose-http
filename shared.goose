@@ -8,7 +8,9 @@
 // once, the creator's included, and no handle is used after its last. Hand
 // a reference to another thread only through something that orders memory:
 // a mailbox, a queue, thread_spawn. Retain before sending a reference, and
-// release it if the send fails.
+// release it if the send fails. A handle is checked as handle.goose's are:
+// one used after its blob's last release, or one never put, is refused,
+// even once its slot holds another blob, rather than read.
 //
 // The blobs are C's (shim/shared.c), since Goose has no memory threads share.
 //
@@ -22,7 +24,9 @@ namespace http;
 import std;
 import message;
 
-// A blob. Flat, so it crosses thread_spawn, queues and mail.
+// A blob: its slot in the process's table and the slot's generation, as
+// shim/shared.c packs them; 0 is none. Flat, so it crosses thread_spawn,
+// queues and mail.
 struct Shared { h: i64 = 0 }
 
 extern "shared_put" fn shared_put_c(data: const u8[:], refs: i64) -> i64;
@@ -39,7 +43,8 @@ extern "shared_flatten" fn shared_flatten(buf: const u8[:], skip: i64, out: u8[>
 extern "shared_send" fn shared_send(fd: i32, buf: const u8[:], skip: i64) -> i64;
 
 // Copies data into a new blob with refs references. Returns it, and 0 or
-// -code: EINVAL for refs < 1, ENOMEM.
+// -code: EINVAL for refs < 1 or past 2^32 - 1, which a blob's count is
+// held to, ENOMEM, also past 16M blobs at once.
 fn shared_put(data: const u8[:], refs: i64 = 1) -> Shared, i64 {
     let h = shared_put_c(data, refs);
     guard h > 0 else { return Shared { .. }, h; }
@@ -52,7 +57,8 @@ fn shared_len(b: Shared) -> i64 {
     return if n < 0 { -1 } else { n };
 }
 
-// Adds n references to b. False for a handle that isn't a blob's, or n < 1.
+// Adds n references to b. False for a handle that isn't a blob's, n < 1, or
+// a count past 2^32 - 1.
 inline fn shared_retain(b: Shared, n: i64 = 1) -> bool { shared_retain_c(b.h, n) == 0 }
 
 // Drops one reference to b, freeing it with the last. Returns the references

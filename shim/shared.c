@@ -3,12 +3,21 @@
    them. A broker can encode a publication once and hand each subscriber's
    worker a reference, instead of a copy through each mailbox.
 
+   A blob lives in a slot of one process-wide table, and a handle is the
+   slot and the generation the slot had when the blob was put, as
+   handle.goose's are: generation << 32 | slot, never 0 or negative. Each
+   slot packs its generation and its blob's count in one atomic word, so
+   every call checks the generation and changes the count in one
+   compare-and-swap. The last release advances the generation in the same
+   step, so a handle kept past it, or a forged one, is refused, even once
+   the slot holds another blob, rather than read. The table grows in chunks
+   that never move, so a lookup takes no lock; only a put and a last release
+   take the free list's.
+
    A blob's bytes never change after shared_put, and a reference travels to
    another thread only through something that orders memory, such as a
-   mailbox or queue, so readers need no lock. The count is atomic. A handle
-   is the blob's address; the magic word catches most uses after the last
-   release, not all, so the contract is the caller's: every retain is matched
-   by one release, and no handle is used after its last.
+   mailbox or queue, so readers need no lock. Every retain is still the
+   caller's to match with one release.
 
    Every function returns 0 or more on success and -code on failure, where
    code is a Linux errno value, as the other shims' do. None keeps a pointer
@@ -27,70 +36,159 @@
 
 #define SHARED_EINVAL 22
 #define SHARED_ENOMEM 12
-#define SHARED_MAGIC 0x5348415245444231ull   /* "SHAREDB1" */
-#define SHARED_DEAD 0x4445414442454546ull    /* "DEADBEEF", once freed */
 
 typedef struct { const uint8_t *data; int64_t len; } shared_bytes;
 
+/* A slot: word is generation << 32 | references, and a slot whose count is
+   0 holds no blob. A slot's first generation is 1; one that was never used
+   reads 0, which no handle has. Generations stay below 2^31, so that a
+   handle is positive. */
 typedef struct {
-    uint64_t magic;
-    _Atomic int64_t refs;
-    int64_t len;
-    uint8_t data[];
-} shared_blob;
+    _Atomic uint64_t word;
+    _Atomic(uint8_t *) data;
+    _Atomic int64_t len;
+    uint32_t next;              /* the next free slot, under the lock */
+} shared_slot;
 
-static shared_blob *shared_of(int64_t h) {
-    shared_blob *b = (shared_blob *)(intptr_t)h;
-    return b && b->magic == SHARED_MAGIC ? b : NULL;
+#define SHARED_CHUNK 4096
+#define SHARED_CHUNKS 4096      /* up to 16M blobs at once */
+#define SHARED_NONE UINT32_MAX
+#define SHARED_GEN_MAX 0x7FFFFFFFu
+
+static _Atomic(shared_slot *) shared_chunks[SHARED_CHUNKS];
+static atomic_flag shared_lock = ATOMIC_FLAG_INIT;
+static uint32_t shared_free = SHARED_NONE;     /* under the lock */
+static uint32_t shared_used;                   /* slots ever handed out, under the lock */
+
+static void shared_lock_take(void) {
+    while (atomic_flag_test_and_set_explicit(&shared_lock, memory_order_acquire)) {}
+}
+
+static void shared_lock_drop(void) { atomic_flag_clear_explicit(&shared_lock, memory_order_release); }
+
+static uint32_t shared_next_gen(uint32_t gen) { return gen >= SHARED_GEN_MAX ? 1 : gen + 1; }
+
+/* h's slot, or NULL for a handle that names none. Its generation is gen. */
+static shared_slot *shared_slot_of(int64_t h, uint32_t *gen) {
+    if (h <= 0) return NULL;
+    uint32_t slot = (uint32_t)h;
+    *gen = (uint32_t)((uint64_t)h >> 32);
+    if (*gen == 0 || slot >= (uint32_t)SHARED_CHUNK * SHARED_CHUNKS) return NULL;
+    shared_slot *chunk = atomic_load_explicit(&shared_chunks[slot / SHARED_CHUNK], memory_order_acquire);
+    return chunk ? &chunk[slot % SHARED_CHUNK] : NULL;
+}
+
+/* Adds n references to h's blob, and returns its slot, or NULL for a handle
+   that isn't a live blob's, or a count past 2^32 - 1. Acquire: the caller
+   then reads the blob's bytes. */
+static shared_slot *shared_acquire(int64_t h, int64_t n) {
+    uint32_t gen;
+    shared_slot *s = shared_slot_of(h, &gen);
+    if (!s || n < 1) return NULL;
+    uint64_t w = atomic_load_explicit(&s->word, memory_order_relaxed);
+    do {
+        uint64_t refs = (uint32_t)w;
+        if ((uint32_t)(w >> 32) != gen || refs == 0 || (uint64_t)n > UINT32_MAX - refs) return NULL;
+    } while (!atomic_compare_exchange_weak_explicit(&s->word, &w, w + (uint64_t)n,
+                                                    memory_order_acquire, memory_order_relaxed));
+    return s;
 }
 
 /* Copies data into a new blob with refs references and returns its handle,
-   or -EINVAL for refs < 1, -ENOMEM. */
+   or -EINVAL for refs < 1 or past 2^32 - 1, -ENOMEM. */
 int64_t shared_put(shared_bytes data, int64_t refs) {
-    if (data.len < 0 || refs < 1) return -SHARED_EINVAL;
-    shared_blob *b = malloc(sizeof *b + (size_t)data.len);
-    if (!b) return -SHARED_ENOMEM;
-    b->magic = SHARED_MAGIC;
-    atomic_init(&b->refs, refs);
-    b->len = data.len;
-    if (data.len) memcpy(b->data, data.data, (size_t)data.len);
-    return (int64_t)(intptr_t)b;
-}
-
-/* The blob's length, or -EINVAL for a handle that isn't one. */
-int64_t shared_len(int64_t h) {
-    shared_blob *b = shared_of(h);
-    return b ? b->len : -SHARED_EINVAL;
-}
-
-/* Adds n references, or -EINVAL. */
-int32_t shared_retain(int64_t h, int64_t n) {
-    shared_blob *b = shared_of(h);
-    if (!b || n < 1) return -SHARED_EINVAL;
-    atomic_fetch_add_explicit(&b->refs, n, memory_order_relaxed);
-    return 0;
-}
-
-/* Drops one reference, freeing the blob with its last. Returns the
-   references left, or -EINVAL. */
-int64_t shared_release(int64_t h) {
-    shared_blob *b = shared_of(h);
-    if (!b) return -SHARED_EINVAL;
-    int64_t left = atomic_fetch_sub_explicit(&b->refs, 1, memory_order_acq_rel) - 1;
-    if (left == 0) {
-        b->magic = SHARED_DEAD;
-        free(b);
+    if (data.len < 0 || refs < 1 || refs > (int64_t)UINT32_MAX) return -SHARED_EINVAL;
+    uint8_t *bytes = malloc(data.len ? (size_t)data.len : 1);
+    if (!bytes) return -SHARED_ENOMEM;
+    if (data.len) memcpy(bytes, data.data, (size_t)data.len);
+    shared_lock_take();
+    uint32_t slot = shared_free;
+    if (slot != SHARED_NONE) {
+        shared_slot *chunk = atomic_load_explicit(&shared_chunks[slot / SHARED_CHUNK], memory_order_relaxed);
+        shared_free = chunk[slot % SHARED_CHUNK].next;
+    } else if (shared_used < (uint32_t)SHARED_CHUNK * SHARED_CHUNKS) {
+        slot = shared_used;
+        if (slot % SHARED_CHUNK == 0) {
+            shared_slot *chunk = calloc(SHARED_CHUNK, sizeof *chunk);
+            if (!chunk) slot = SHARED_NONE;
+            else atomic_store_explicit(&shared_chunks[slot / SHARED_CHUNK], chunk, memory_order_release);
+        }
+        if (slot != SHARED_NONE) shared_used++;
     }
-    return left;
+    shared_lock_drop();
+    if (slot == SHARED_NONE) {
+        free(bytes);
+        return -SHARED_ENOMEM;
+    }
+    shared_slot *s = &atomic_load_explicit(&shared_chunks[slot / SHARED_CHUNK], memory_order_relaxed)[slot % SHARED_CHUNK];
+    atomic_store_explicit(&s->data, bytes, memory_order_relaxed);
+    atomic_store_explicit(&s->len, data.len, memory_order_relaxed);
+    uint32_t gen = (uint32_t)(atomic_load_explicit(&s->word, memory_order_relaxed) >> 32);
+    if (gen == 0) gen = 1;
+    /* Release: whoever acquires the blob by this handle sees its bytes. */
+    atomic_store_explicit(&s->word, (uint64_t)gen << 32 | (uint64_t)refs, memory_order_release);
+    return (int64_t)((uint64_t)gen << 32 | slot);
+}
+
+/* The blob's length, or -EINVAL for a handle that isn't a live blob's. */
+int64_t shared_len(int64_t h) {
+    uint32_t gen;
+    shared_slot *s = shared_slot_of(h, &gen);
+    if (!s) return -SHARED_EINVAL;
+    uint64_t w = atomic_load_explicit(&s->word, memory_order_acquire);
+    if ((uint32_t)(w >> 32) != gen || (uint32_t)w == 0) return -SHARED_EINVAL;
+    /* The slot outlives its blobs, so this reads no freed memory, and a
+       blob put in it since has another generation. */
+    return atomic_load_explicit(&s->len, memory_order_relaxed);
+}
+
+/* Adds n references, or -EINVAL for a handle that isn't a live blob's, n < 1,
+   or a count past 2^32 - 1. */
+int32_t shared_retain(int64_t h, int64_t n) {
+    return shared_acquire(h, n) ? 0 : -SHARED_EINVAL;
+}
+
+/* Drops one reference, freeing the blob with its last, which advances the
+   slot's generation and frees the slot. Returns the references left, or
+   -EINVAL for a handle that isn't a live blob's. */
+int64_t shared_release(int64_t h) {
+    uint32_t gen;
+    shared_slot *s = shared_slot_of(h, &gen);
+    if (!s) return -SHARED_EINVAL;
+    uint64_t w = atomic_load_explicit(&s->word, memory_order_relaxed);
+    uint64_t next;
+    do {
+        uint32_t refs = (uint32_t)w;
+        if ((uint32_t)(w >> 32) != gen || refs == 0) return -SHARED_EINVAL;
+        next = refs == 1 ? (uint64_t)shared_next_gen(gen) << 32 : w - 1;
+    } while (!atomic_compare_exchange_weak_explicit(&s->word, &w, next,
+                                                    memory_order_acq_rel, memory_order_relaxed));
+    if ((uint32_t)next != 0) return (uint32_t)next;
+    free(atomic_load_explicit(&s->data, memory_order_relaxed));
+    atomic_store_explicit(&s->data, NULL, memory_order_relaxed);
+    shared_lock_take();
+    s->next = shared_free;
+    shared_free = (uint32_t)h;
+    shared_lock_drop();
+    return 0;
 }
 
 /* Appends bytes [from, to) of the blob to out. Returns 0, or -EINVAL for a
-   handle that isn't one or a range outside it, with nothing appended. */
+   handle that isn't a live blob's or a range outside it, with nothing
+   appended. It holds a reference of its own while it copies: a caller's
+   would do, but a stale handle has none, and another thread's last release
+   could free the bytes mid-copy. */
 int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
-    shared_blob *b = shared_of(h);
-    if (!b || from < 0 || to < from || to > b->len) return -SHARED_EINVAL;
-    gs_bld_append(out, b->data + from, to - from);
-    return 0;
+    shared_slot *s = shared_acquire(h, 1);
+    if (!s) return -SHARED_EINVAL;
+    int64_t len = atomic_load_explicit(&s->len, memory_order_relaxed);
+    int32_t r = -SHARED_EINVAL;
+    if (from >= 0 && to >= from && to <= len) {
+        gs_bld_append(out, atomic_load_explicit(&s->data, memory_order_relaxed) + from, to - from);
+        r = 0;
+    }
+    shared_release(h);
+    return r;
 }
 
 /* Gathered sends, on a loop's thread: while the loop turns gathering on for
@@ -102,12 +200,13 @@ int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
    send as a claim (shared_claim_take), which the ring frees once the bytes
    have gone or the connection closed. The loops gather only while they
    drive a connection, and settle or hand on every range before the turn
-   ends, so none outlives the connection it was deferred on. */
-typedef struct { int64_t at; shared_blob *b; int64_t from, to; } shared_piece;
+   ends, so none outlives the connection it was deferred on. A piece's
+   reference keeps its bytes, d, in place until its release. */
+typedef struct { int64_t at; int64_t h; const uint8_t *d; int64_t n; } shared_piece;
 static _Thread_local struct { shared_piece *p; int64_t n, cap, bytes; int on; } gather;
 
 void shared_settle(void) {
-    for (int64_t i = 0; i < gather.n; i++) shared_release((int64_t)(intptr_t)gather.p[i].b);
+    for (int64_t i = 0; i < gather.n; i++) shared_release(gather.p[i].h);
     gather.n = 0;
     gather.bytes = 0;
 }
@@ -125,18 +224,27 @@ int64_t shared_pending(void) { return gather.bytes; }
    Returns 1, or 0 when the loop isn't gathering, for the caller to copy, or
    -EINVAL as shared_append. */
 int32_t shared_defer(int64_t h, int64_t from, int64_t to, int64_t at) {
-    shared_blob *b = shared_of(h);
-    if (!b || from < 0 || to < from || to > b->len) return -SHARED_EINVAL;
-    if (!gather.on) return 0;
-    if (to == from) return 1;
-    if (gather.n == gather.cap) {
+    if (gather.on && gather.n == gather.cap) {
         int64_t cap = gather.cap ? 2 * gather.cap : 64;
         shared_piece *p = realloc(gather.p, (size_t)cap * sizeof *p);
-        if (!p) return 0;
-        gather.p = p; gather.cap = cap;
+        if (p) {
+            gather.p = p;
+            gather.cap = cap;
+        }
     }
-    atomic_fetch_add_explicit(&b->refs, 1, memory_order_relaxed);
-    gather.p[gather.n++] = (shared_piece){ at, b, from, to };
+    /* Not gathering, or out of memory: the caller copies the range. */
+    if (!gather.on || gather.n == gather.cap) {
+        int64_t len = shared_len(h);
+        return len >= 0 && from >= 0 && to >= from && to <= len ? 0 : -SHARED_EINVAL;
+    }
+    shared_slot *s = shared_acquire(h, 1);
+    if (!s) return -SHARED_EINVAL;
+    int64_t len = atomic_load_explicit(&s->len, memory_order_relaxed);
+    if (from < 0 || to < from || to > len || to == from) {
+        shared_release(h);
+        return to == from && from >= 0 && from <= len ? 1 : -SHARED_EINVAL;
+    }
+    gather.p[gather.n++] = (shared_piece){ at, h, atomic_load_explicit(&s->data, memory_order_relaxed) + from, to - from };
     gather.bytes += to - from;
     return 1;
 }
@@ -150,7 +258,7 @@ static void shared_runs(shared_bytes buf, int64_t skip, int (*f)(void *, const u
         for (int k = 0; k < 2; k++) {
             const uint8_t *d; int64_t n;
             if (k == 0) { d = buf.data + at; n = end - at; at = end; }
-            else if (i < gather.n) { d = gather.p[i].b->data + gather.p[i].from; n = gather.p[i].to - gather.p[i].from; }
+            else if (i < gather.n) { d = gather.p[i].d; n = gather.p[i].n; }
             else break;
             if (skip >= n) { skip -= n; continue; }
             if (!f(arg, d + skip, n - skip)) return;
@@ -180,7 +288,7 @@ typedef struct { const uint8_t *d; int64_t n; } shared_run;
 typedef struct shared_claim {
     int64_t len;
     int64_t nruns, nrefs;
-    shared_blob **refs;
+    int64_t *refs;          /* the ranges' handles */
     shared_run runs[];
 } shared_claim;
 
@@ -195,18 +303,18 @@ static int shared_claim_run(void *arg, const uint8_t *d, int64_t n) {
 shared_claim *shared_claim_take(const uint8_t *data, int64_t len) {
     int64_t n = gather.n;
     size_t runs = (size_t)(2 * n + 1);
-    shared_claim *c = malloc(sizeof *c + runs * sizeof(shared_run) + (size_t)n * sizeof(shared_blob *) + (size_t)len);
+    shared_claim *c = malloc(sizeof *c + runs * sizeof(shared_run) + (size_t)n * sizeof(int64_t) + (size_t)len);
     if (!c) {
         shared_settle();
         return NULL;
     }
-    c->refs = (shared_blob **)(void *)(c->runs + runs);
+    c->refs = (int64_t *)(void *)(c->runs + runs);
     uint8_t *copy = (uint8_t *)(c->refs + n);
     if (len) memcpy(copy, data, (size_t)len);
     c->len = len + gather.bytes;
     c->nruns = 0;
     shared_runs((shared_bytes){ copy, len }, 0, shared_claim_run, c);
-    for (int64_t i = 0; i < n; i++) c->refs[i] = gather.p[i].b;
+    for (int64_t i = 0; i < n; i++) c->refs[i] = gather.p[i].h;
     c->nrefs = n;
     gather.n = 0;
     gather.bytes = 0;
@@ -217,7 +325,7 @@ int64_t shared_claim_len(const shared_claim *c) { return c->len; }
 
 /* Releases the claim's references, and frees it. */
 void shared_claim_free(shared_claim *c) {
-    for (int64_t i = 0; i < c->nrefs; i++) shared_release((int64_t)(intptr_t)c->refs[i]);
+    for (int64_t i = 0; i < c->nrefs; i++) shared_release(c->refs[i]);
     free(c);
 }
 

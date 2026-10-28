@@ -1,5 +1,8 @@
 put: lengths 13 and 0
 ranges: >helloshared
 counted: one reference left
+forged: refused
+stale: refused, also in a reused slot
 reader: hello, shared
+threads: counts kept, stale handles refused
 released
