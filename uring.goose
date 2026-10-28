@@ -515,7 +515,9 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
         guard c.fd >= 0 && c.state == OPEN && c.x.stream.later.key == key && c.x.stream.waiting == waited else { return; }
         c.x.stream.waiting = false;
-        retire(c.x.stream);
+        // An upgraded exchange's TIMEOUT is a tick that ends nothing: its key stays live through the
+        // handler, as through WAKE, so a publisher's mail_live finds it; answer retires it after.
+        if !raw(c.x.stream) { retire(c.x.stream); }
         let ev = Event { kind: TIMEOUT, req: nothing, data: "", whole: false, trailers: "",
                          tag: if waited { 0 } else { NO_ROOM } };
         resume(c, ev);

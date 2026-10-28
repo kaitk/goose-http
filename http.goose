@@ -328,7 +328,7 @@ fn later(out: Reply, ms: i64) -> MailAddress {
 // Makes s's address stale once its exchange no longer waits. The key stays
 // live through WAKE until the handler returns, so a sender of a reply in
 // pieces doesn't find it stale between one piece and the handler's next
-// later.
+// later; after an upgrade, through TIMEOUT too.
 fn retire(s: Stream&) {
     guard s.live && !s.waiting else { return; }
     s.live = false;
