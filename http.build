@@ -1,10 +1,10 @@
 // The C the package calls, which goose build compiles and links into every program
 // that imports it: each platform's shim (docs/architecture.md).
-c_sources_linux = ["shim/net.c", "shim/uring.c", "shim/ring_epoll.c", "shim/mail.c", "shim/store.c"];
+c_sources_linux = ["shim/net.c", "shim/uring.c", "shim/ring_epoll.c", "shim/mail.c", "shim/store.c", "shim/shared.c"];
 c_libs_linux = ["uring"];
-c_sources_macos = ["shim/kqueue.c", "shim/ring_epoll.c", "shim/mail.c", "shim/store.c"];
+c_sources_macos = ["shim/kqueue.c", "shim/ring_epoll.c", "shim/mail.c", "shim/store.c", "shim/shared.c"];
 c_defines_macos = ["RING_EPOLL_ONLY"];
-c_sources_windows = ["shim/net_win.c", "shim/iocp.c", "shim/mail.c", "shim/store.c"];
+c_sources_windows = ["shim/net_win.c", "shim/iocp.c", "shim/mail.c", "shim/store.c", "shim/shared.c"];
 c_libs_windows = ["ws2_32", "mswsock"];
 // MSVC compiles C as C89 with extensions unless asked; the shim uses C11's
 // _Static_assert.

@@ -1,0 +1,5 @@
+put: lengths 13 and 0
+ranges: >helloshared
+counted: one reference left
+reader: hello, shared
+released
