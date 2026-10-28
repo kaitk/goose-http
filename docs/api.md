@@ -522,6 +522,37 @@ else { http::respond(out, 503, "text/plain", "busy"); return; }
   `Config.mail_size` bytes, 256 by default. A `Config.mail_slots` that `mail_open`
   refuses stops the loop with that error.
 
+### Shared blobs
+
+A publisher that sends one message to many connections on several workers can encode it
+once, with `import http.shared`, and mail each worker a handle, eight bytes, instead of
+the message ([decision](decisions.md#shared-blobs-carry-one-message-to-many-workers)).
+
+```rust
+let b, err = http::shared_put(body, 1);        // the publisher's reference
+http::shared_retain(b, 1);                     // one for each worker it mails b.h to
+// In the worker, at WAKE:
+http::send_shared(out, b, 0, http::shared_len(b));
+http::shared_release(b);
+```
+
+- `http::shared_put(data, refs)` copies `data` into a new blob with `refs` references
+  and returns it and 0, or -code: `EINVAL` for `refs` below 1 or past 2^32 - 1, and
+  `ENOMEM`, also past 16M blobs at once.
+- `http::shared_retain(b, n)`, `http::shared_release(b)`: every reference is released
+  once, the creator's included; the last release frees the blob. Hand a reference to
+  another thread only through something that orders memory: a box, a queue,
+  `thread_spawn`. Retain before sending, and release if the send fails.
+- `http::shared_len(b)`, and `http::shared_append(b, from, to, out)`, which copies a
+  range into a buffer.
+- `http::send_shared(out, b, from, to)` sends a range on an upgraded connection, as
+  `http::send` does, and `after_drain` counts it. False, sending nothing, for a range
+  outside the blob, a handle that isn't a blob's, or a stream that isn't open and
+  upgraded.
+- A handle is checked as `handle.goose`'s are: one used after its blob's last
+  release, or one never put, is refused, even once its slot holds another blob,
+  rather than read. A blob's bytes never change.
+
 ### Lanes
 
 A lane is the threads that do one kind of slow work, each with a box of its own. `main`

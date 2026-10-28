@@ -1165,6 +1165,48 @@ of the responses still reading a file, since Goose frees memory only at scope ex
 and `inotify`, which is Linux only and adds a descriptor and events to each worker's
 loop.
 
+## Shared blobs carry one message to many workers
+
+Decided 2026-10-28, for Campfire's cable fan-out.
+
+A program that sends one message to many connections on several workers can put it in a
+shared blob (`shared.goose`, `shim/shared.c`) and mail each worker its handle instead of
+the bytes. A blob is a refcounted, immutable byte string in one process-wide table;
+`send_shared` copies a range of it into the connection's output.
+
+- The bytes cross threads once, not once per worker, and a box's slots hold handles, so
+  they stay small whatever the message's size.
+- A handle is a slot and a generation, as `handle.goose`'s: the last release advances
+  the generation, so a stale or forged handle is refused rather than read. Each slot
+  packs its generation and count in one atomic word, so a retain or release is one
+  compare-and-swap, and a lookup takes no lock; the table grows in chunks that never
+  move.
+- A program that never calls `shared_put` pays nothing: the table is empty and nothing
+  on the request path looks at it.
+
+Why: Campfire's broker copied each publication into every reader's delivery mail. With
+the body put once and described by handle, its 64-reader fan-out rose from 1,905 to
+2,871 messages a second, and CPU per message fell 40%, together with two changes of its
+own that coalesce frames (once-campfire-goose `9542706`, M1, Docker's arm64 VM, 3 rotated
+rounds).
+
+Rejected: copying into each worker's box, which sizes every slot for the largest message;
+and a pointer with no generation, which a use after the last release reads.
+
+## Shared blobs' free list behind a mutex, not a spinlock
+
+Shared blobs (`shim/shared.c`) are found through a slot table whose lookups take no lock;
+only the free list does, for a few instructions at a put and at a last release. That lock
+is the platform's mutex, as `mail.c`'s. Uncontended, a mutex and a spinlock each cost one
+atomic. Contended, a program often runs more threads than cores (Campfire runs four
+workers, its broker and a checkpointer on four CPUs), and a spinning waiter whose holder
+was preempted burns its whole time slice; a new chunk's `calloc` and page faults, once
+per 4096 slots, also run under the lock. A mutex sleeps instead.
+
+Rejected: a bare spinlock (the first version); and a spinlock with `pause`, a bounded
+spin then a yield, and chunks allocated outside the lock, which keeps a fast path no
+profile asked for, at a couple of lock operations per published message.
+
 ## Not yet decided
 
 ### Compression in an optional module
