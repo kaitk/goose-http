@@ -95,11 +95,14 @@ int32_t shared_append(int64_t h, int64_t from, int64_t to, gs_rref out) {
 
 /* Gathered sends, on a loop's thread: while the loop turns gathering on for
    a connection, shared_defer records a blob's range at an offset into the
-   loop's write buffer, retained, instead of copying it there, and the loop
-   sends the buffer and the ranges with one sendmsg. What the socket doesn't
-   take, shared_flatten copies out. Either way shared_settle releases the
-   ranges; the loop settles before each connection's turn, so none outlives
-   the connection it was deferred on. */
+   loop's write buffer, retained, instead of copying it there. epoll's loop
+   sends the buffer and the ranges with one sendmsg, and what the socket
+   doesn't take, shared_flatten copies out; either way shared_settle
+   releases the ranges. A ring's loop hands the buffer and the ranges to its
+   send as a claim (shared_claim_take), which the ring frees once the bytes
+   have gone or the connection closed. The loops gather only while they
+   drive a connection, and settle or hand on every range before the turn
+   ends, so none outlives the connection it was deferred on. */
 typedef struct { int64_t at; shared_blob *b; int64_t from, to; } shared_piece;
 static _Thread_local struct { shared_piece *p; int64_t n, cap, bytes; int on; } gather;
 
@@ -110,7 +113,7 @@ void shared_settle(void) {
 }
 
 /* Settles, then gathers the next turn's ranges if on. */
-void shared_gather(int32_t on) {
+void shared_gather(uint8_t on) {
     shared_settle();
     gather.on = on;
 }
@@ -168,9 +171,92 @@ void shared_flatten(shared_bytes buf, int64_t skip, gs_rref out) {
     shared_settle();
 }
 
+/* A ring's gathered send (shim/uring.c, shim/ring_epoll.c), which outlives
+   the call that queued it: a copy of the write buffer, and the deferred
+   ranges' references, moved from the loop's list, all in one allocation.
+   runs, in order, point into the copy and the blobs. shared_claim_free
+   releases the references once the ring is done with the bytes. */
+typedef struct { const uint8_t *d; int64_t n; } shared_run;
+typedef struct shared_claim {
+    int64_t len;
+    int64_t nruns, nrefs;
+    shared_blob **refs;
+    shared_run runs[];
+} shared_claim;
+
+static int shared_claim_run(void *arg, const uint8_t *d, int64_t n) {
+    shared_claim *c = arg;
+    if (n > 0) c->runs[c->nruns++] = (shared_run){ d, n };
+    return 1;
+}
+
+/* Takes the write buffer, len bytes at data, and the deferred ranges into a claim, leaving
+   none deferred. NULL when out of memory, with the ranges settled. */
+shared_claim *shared_claim_take(const uint8_t *data, int64_t len) {
+    int64_t n = gather.n;
+    size_t runs = (size_t)(2 * n + 1);
+    shared_claim *c = malloc(sizeof *c + runs * sizeof(shared_run) + (size_t)n * sizeof(shared_blob *) + (size_t)len);
+    if (!c) {
+        shared_settle();
+        return NULL;
+    }
+    c->refs = (shared_blob **)(void *)(c->runs + runs);
+    uint8_t *copy = (uint8_t *)(c->refs + n);
+    if (len) memcpy(copy, data, (size_t)len);
+    c->len = len + gather.bytes;
+    c->nruns = 0;
+    shared_runs((shared_bytes){ copy, len }, 0, shared_claim_run, c);
+    for (int64_t i = 0; i < n; i++) c->refs[i] = gather.p[i].b;
+    c->nrefs = n;
+    gather.n = 0;
+    gather.bytes = 0;
+    return c;
+}
+
+int64_t shared_claim_len(const shared_claim *c) { return c->len; }
+
+/* Releases the claim's references, and frees it. */
+void shared_claim_free(shared_claim *c) {
+    for (int64_t i = 0; i < c->nrefs; i++) shared_release((int64_t)(intptr_t)c->refs[i]);
+    free(c);
+}
+
 #ifndef _WIN32
 #define SHARED_IOV 64
 typedef struct { struct iovec v[SHARED_IOV]; int n; } shared_iovs;
+
+/* Fills v with up to max runs of the claim from offset off. Returns how
+   many. */
+int32_t shared_claim_iov(const shared_claim *c, int64_t off, struct iovec *v, int32_t max) {
+    int32_t k = 0;
+    for (int64_t i = 0; i < c->nruns && k < max; i++) {
+        int64_t n = c->runs[i].n;
+        if (off >= n) {
+            off -= n;
+            continue;
+        }
+        v[k++] = (struct iovec){ (void *)(c->runs[i].d + off), (size_t)(n - off) };
+        off = 0;
+    }
+    return k;
+}
+
+/* Maps a failed send's errno to the Linux numbers the loops tell apart
+   (sys.goose). */
+static int64_t shared_send_err(void) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return -11;
+    if (errno == EINTR) return -4;
+    return -32;
+}
+
+/* Sends the claim from offset off on socket fd, in one sendmsg of up to 64
+   runs. Returns the bytes sent, or -errno as shared_send. */
+int64_t shared_claim_send(int32_t fd, const shared_claim *c, int64_t off) {
+    struct iovec v[SHARED_IOV];
+    struct msghdr m = { .msg_iov = v, .msg_iovlen = (size_t)shared_claim_iov(c, off, v, SHARED_IOV) };
+    ssize_t r = sendmsg(fd, &m, MSG_NOSIGNAL);
+    return r >= 0 ? r : shared_send_err();
+}
 
 static int shared_iov_run(void *arg, const uint8_t *d, int64_t n) {
     shared_iovs *iov = arg;
@@ -187,11 +273,7 @@ int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) {
     shared_runs(buf, skip, shared_iov_run, &iov);
     struct msghdr m = { .msg_iov = iov.v, .msg_iovlen = (size_t)iov.n };
     ssize_t r = sendmsg(fd, &m, MSG_NOSIGNAL);
-    if (r >= 0) return r;
-    /* The loops tell only these apart, by their Linux numbers (sys.goose). */
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return -11;
-    if (errno == EINTR) return -4;
-    return -32;
+    return r >= 0 ? r : shared_send_err();
 }
 #else
 int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) { (void)fd; (void)buf; (void)skip; return -38; }

@@ -351,7 +351,12 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 EpollTurn { moved: done > 0, full: full }
             }
         };
-        guard going else { return false; }
+        // Gathering ends with the turn: a CLOSED or HTTP/3 handler, outside
+        // it, copies into its own output.
+        guard going else {
+            shared_gather(false);
+            return false;
+        }
         if rlen > 0 {
             c.held = spill.alloc_slice(rlen);
             copy_into(c.held, rbuf[..rlen]);
@@ -365,6 +370,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             c.out = spill.alloc_slice(wbuf.len - woff);
             copy_into(c.out, wbuf[woff..]);
         }
+        shared_gather(false);
         return true;
     }
 
@@ -516,7 +522,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         guard c.state != DRAINING else { return true; }
         // A handshake has request_ms from the accept, however it progresses.
         guard c.tls < 0 || tls_ready(tls, c.tls) else { return true; }
-        let writing = woff < wbuf.len || c.x.stream.file >= 0;
+        let writing = woff < wbuf.len + shared_pending() || c.x.stream.file >= 0;
         // An h2c connection's streams have their own limits (later's), so
         // the connection's is idle_ms, or write_ms while the client doesn't
         // take what it was sent.
