@@ -770,9 +770,11 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
         drop_first(turns, listed);
         // The wakes asked for so far: those they ask for go in the next pass.
-        let asked = woken.len;
-        for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
-        drop_first(woken, asked);
+        if woken.len > 0 {
+            let asked = woken.len;
+            for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
+            drop_first(woken, asked);
+        }
         if h3_serves(tls) { h3_tick(tls, cfg, fresh, common, now, H); }
         if waiting { expire(timers, now) { key => timed_out(key, true); }; }
         // With or without a box: without one, every later is owed its TIMEOUT.

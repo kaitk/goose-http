@@ -785,9 +785,11 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             for k in owed { timed_out(overdue[k], false); }
             drop_first(overdue, owed);
             // The wakes asked for so far: those they ask for go in the next pass.
-            let asked = woken.len;
-            for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
-            drop_first(woken, asked);
+            if woken.len > 0 {
+                let asked = woken.len;
+                for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
+                drop_first(woken, asked);
+            }
             let tick = now >= next_sweep;
             if tick {
                 sweep();
