@@ -167,6 +167,10 @@ struct Config {
     mail_slots: i32 = 0,
     mail_size: i32 = 256,
     max_waiting: i64 = 0,
+    // Experimental, epoll loop only: each pass serves its plain HTTP events
+    // first, then its upgraded connections' events, then the wakes asked for,
+    // so a request doesn't wait behind the pass's WebSocket writes.
+    requests_first: bool = false,
 }
 
 // Why a loop stopped: the call that failed, and its error code, one of

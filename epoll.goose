@@ -171,6 +171,9 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var overdue: u64[>..] = [];
     // Connections owed another turn, by slot, for reads or a drain credit.
     var turns: u64[>..] = [];
+    // With cfg.requests_first, the upgraded connections' events of this pass,
+    // as pairs of slot and hup.
+    var deferred: u64[>..] = [];
     var generation: u64 = 0;
     let nothing = Request { .. };
     let none = Event { kind: NO_EVENT, req: nothing, data: "", whole: false, trailers: "" };
@@ -747,7 +750,10 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             }
             if ev.tag == EPOLL_WAKE {
                 // A worker's mail asks its wakes now, as mail did, not after the pass's other events.
-                if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; wake_all(); }
+                if waiting {
+                    mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); };
+                    if !cfg.requests_first { wake_all(); }
+                }
                 continue;
             }
             if h3_serves(tls) {
@@ -766,8 +772,22 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             // A WAKE earlier in the batch may have closed it.
             if conns[i].fd < 0 { continue; }
             conns[i].empty = false;
-            go(i, ev.events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR) != 0, none);
+            let hup = ev.events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR) != 0;
+            if cfg.requests_first && raw(conns[i].x.stream) {
+                deferred.push(i as u64);
+                deferred.push(if hup { 1 } else { 0 });
+                continue;
+            }
+            go(i, hup, none);
         }
+        // Only the slot's own turns close an upgraded connection, so one still
+        // open and upgraded is the one deferred.
+        for k in deferred.len / 2 {
+            let i = deferred[2*k] as i64;
+            if conns[i].fd >= 0 && raw(conns[i].x.stream) { go(i, deferred[2*k+1] != 0, none); }
+        }
+        deferred.clear();
+        if cfg.requests_first { wake_all(); }
         // One more turn each for the connections listed so far, after this
         // pass's events. A slot that closed and opened again since has ready
         // unset. hup, since a close may have come with the bytes left.
