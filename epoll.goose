@@ -710,6 +710,14 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         resume(i, ev);
     }
 
+    // Delivers the wakes asked for so far: those they ask for wait for the next call.
+    fn wake_all() {
+        guard woken.len > 0 else { return; }
+        let asked = woken.len;
+        for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
+        drop_first(woken, asked);
+    }
+
     var hot = false;
     var failed = Error { call: "", code: 0 };
     loop {
@@ -738,7 +746,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 continue;
             }
             if ev.tag == EPOLL_WAKE {
-                if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; }
+                // A worker's mail asks its wakes now, as mail did, not after the pass's other events.
+                if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; wake_all(); }
                 continue;
             }
             if h3_serves(tls) {
@@ -769,12 +778,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             if conns[i].fd >= 0 && conns[i].ready { go(i, true, none); }
         }
         drop_first(turns, listed);
-        // The wakes asked for so far: those they ask for go in the next pass.
-        if woken.len > 0 {
-            let asked = woken.len;
-            for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
-            drop_first(woken, asked);
-        }
+        wake_all();
         if h3_serves(tls) { h3_tick(tls, cfg, fresh, common, now, H); }
         if waiting { expire(timers, now) { key => timed_out(key, true); }; }
         // With or without a box: without one, every later is owed its TIMEOUT.

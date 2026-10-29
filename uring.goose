@@ -723,6 +723,14 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
     }
 
+    // Delivers the wakes asked for so far: those they ask for wait for the next call.
+    fn wake_all() {
+        guard woken.len > 0 else { return; }
+        let asked = woken.len;
+        for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
+        drop_first(woken, asked);
+    }
+
     // The loop, until a call fails or a stop ends it: then the error, or one
     // with code 0, is returned from here.
     fn spin() -> Error {
@@ -750,7 +758,8 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                     continue;
                 }
                 if cq.tag == RING_WAKE {
-                    if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; }
+                    // A worker's mail asks its wakes now, as mail did, not after the pass's other events.
+                    if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; wake_all(); }
                     continue;
                 }
                 let i = (cq.tag & 0xFFFFFFFF) as i64;
@@ -784,12 +793,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             let owed = overdue.len;
             for k in owed { timed_out(overdue[k], false); }
             drop_first(overdue, owed);
-            // The wakes asked for so far: those they ask for go in the next pass.
-            if woken.len > 0 {
-                let asked = woken.len;
-                for k in asked / 2 { delivered(woken[2*k], woken[2*k+1] as! u32 as i32, ""); }
-                drop_first(woken, asked);
-            }
+            wake_all();
             let tick = now >= next_sweep;
             if tick {
                 sweep();
