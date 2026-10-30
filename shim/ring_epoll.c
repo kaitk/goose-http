@@ -491,6 +491,9 @@ int64_t RP(waker)(int64_t h, uint64_t tag) {
 /* There's no io_uring to probe for: the ring is always this emulation. */
 int32_t ur_probe(void) { return -RP_ENOSYS; }
 
+/* Gathers sends (RP(send_shared)): ring.goose's ring_gathers. */
+uint8_t ur_gathers(int64_t h) { return 1; }
+
 /* net_arm arms no socket on the emulation: shim/kqueue.c's stays ENOSYS on
    it. */
 void ur_bind(int64_t h, uint64_t tag) {}
