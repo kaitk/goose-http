@@ -105,8 +105,9 @@ extern fn net_udp_open(addr: const u8[:], port: i32, flags: i32) -> i32;
 extern fn net_udp_recv(fd: i32, buf: u8[:], slot: i32, sizes: i32[:], peers: UdpPeer[:]) -> i32;
 // Sends the datagrams that lie end to end in buf, sizes[i] bytes each, to
 // peers[i]; with gso, those to one peer of one size together where Linux
-// segments them (UDP_SEGMENT). How many the kernel took, in order, or
-// -EAGAIN for none, and -EINVAL or -EIO where it can't segment them.
+// segments them (UDP_SEGMENT). How many the kernel took, in order, or for
+// none the error the first met, negated: -EAGAIN where the socket has no
+// room, and -EINVAL or -EIO where the kernel can't segment them.
 extern fn net_udp_send(fd: i32, buf: const u8[:], sizes: const i32[:], peers: const UdpPeer[:], gso: bool) -> i32;
 // Writes src into dst with the C library's memmove; net_copy checks that
 // the lengths agree.

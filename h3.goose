@@ -1724,32 +1724,38 @@ fn h3_datagram<S>(h3tx: u8[>..]&, srv: H3ServerOf<S>&, k: i64, d: u8[:], peer: c
 // ---- Sending ----
 
 // Sends the datagrams queued, in one call where the kernel takes them all:
-// those it doesn't take wait for the next. GSO goes off for good where the
-// kernel can't segment.
+// those it doesn't take for want of room wait for the next. GSO goes off for
+// good where the kernel can't segment. A datagram the kernel refuses for
+// another reason, such as its destination, goes, as if lost: it would hold
+// back every connection's behind it for good.
 fn h3_send_now() {
-    guard h3tx_count > 0 else { return; }
-    var r = net_udp_send(h3tx_fd, h3q[..h3q_len], h3tx_sizes[..h3tx_count], h3tx_peers[..h3tx_count], h3gso);
-    if (r == -EINVAL || r == -EIO) && h3gso {
-        h3gso = false;
-        r = net_udp_send(h3tx_fd, h3q[..h3q_len], h3tx_sizes[..h3tx_count], h3tx_peers[..h3tx_count], false);
+    while h3tx_count > 0 {
+        var r = net_udp_send(h3tx_fd, h3q[..h3q_len], h3tx_sizes[..h3tx_count], h3tx_peers[..h3tx_count], h3gso);
+        if (r == -EINVAL || r == -EIO) && h3gso {
+            r = net_udp_send(h3tx_fd, h3q[..h3q_len], h3tx_sizes[..h3tx_count], h3tx_peers[..h3tx_count], false);
+            if r > 0 { h3gso = false; }
+        }
+        guard r != 0 && r != -EAGAIN && r != -EINTR && r != -ENOBUFS else { return; }
+        let taken: i64 = if r > 0 { r } else { 1 };
+        if taken >= h3tx_count {
+            h3q_len = 0;
+            h3tx_count = 0;
+            return;
+        }
+        // Keep the rest, at the front.
+        var sent = 0;
+        for i in taken { sent += h3tx_sizes[i]; }
+        let rest = h3q_len - sent;
+        for i in rest { h3q[i] = h3q[sent + i]; }
+        h3q_len = rest;
+        for i in h3tx_count - taken {
+            h3tx_sizes[i] = h3tx_sizes[taken + i];
+            h3tx_peers[i] = h3tx_peers[taken + i];
+        }
+        h3tx_count -= taken;
+        // Some taken: the next call meets whatever stopped the kernel.
+        if r > 0 { return; }
     }
-    guard r > 0 else { return; }
-    if r >= h3tx_count {
-        h3q_len = 0;
-        h3tx_count = 0;
-        return;
-    }
-    // Keep the rest, at the front.
-    var sent = 0;
-    for i in r { sent += h3tx_sizes[i]; }
-    let rest = h3q_len - sent;
-    for i in rest { h3q[i] = h3q[sent + i]; }
-    h3q_len = rest;
-    for i in h3tx_count - r {
-        h3tx_sizes[i] = h3tx_sizes[r + i];
-        h3tx_peers[i] = h3tx_peers[r + i];
-    }
-    h3tx_count -= r;
 }
 
 // Room for a datagram on listener k's socket: false when the queue is full
