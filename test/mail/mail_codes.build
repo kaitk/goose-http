@@ -1,8 +1,9 @@
 // The C a mail test needs, since it declares the package by mail.goose,
-// which has no sidecar of its own: the box, and the platform's waker.
+// which has no sidecar of its own: the box, and the platform's waker, which
+// on Windows is in iocp.c, whose gathered sends need shared.c.
 // Each mail test has a copy, named after it.
 c_sources_macos = ["../../shim/mail.c", "../../shim/kqueue.c"];
 c_sources_linux = ["../../shim/mail.c", "../../shim/net.c"];
-c_sources_windows = ["../../shim/mail.c", "../../shim/net_win.c", "../../shim/iocp.c"];
+c_sources_windows = ["../../shim/mail.c", "../../shim/net_win.c", "../../shim/iocp.c", "../../shim/shared.c"];
 c_libs_windows = ["ws2_32", "mswsock"];
-c_flags_msvc = ["/std:c11"];
+c_flags_msvc = ["/std:c11", "/experimental:c11atomics"];

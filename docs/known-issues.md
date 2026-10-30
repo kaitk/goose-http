@@ -146,7 +146,9 @@ completion says when the kernel is done with their bytes. A gathered send among 
 freed. The ring is torn down only as its loop ends, so a process that stops leaks
 nothing that outlives it; a program that runs a loop again in the same process keeps
 those blobs. The emulated ring sends synchronously and frees every queued send at
-teardown (2026-10-28).
+teardown (2026-10-28). IOCP's `ur_destroy` (`shim/iocp.c`) frees nothing, for the same
+reason, so there every gathered send still queued at teardown, in flight or not, keeps
+its references (2026-10-30).
 
 ## Benchmarks
 

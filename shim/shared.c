@@ -26,7 +26,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#else
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -67,7 +70,6 @@ static uint32_t shared_used;                   /* slots ever handed out, under t
    preempted burns its whole time slice, and a new chunk's calloc and page
    faults (once per 4096 slots) run under the lock. A mutex sleeps instead. */
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 static SRWLOCK shared_lock = SRWLOCK_INIT;
 static void shared_lock_take(void) { AcquireSRWLockExclusive(&shared_lock); }
@@ -321,7 +323,7 @@ int64_t shared_flatten(shared_bytes buf, int64_t skip, shared_out out) {
     return cap - out.len;
 }
 
-/* A ring's gathered send (shim/uring.c, shim/ring_epoll.c), which outlives
+/* A ring's gathered send (shim/uring.c, shim/ring_epoll.c, shim/iocp.c), which outlives
    the call that queued it: a copy of the write buffer, and the deferred
    ranges' references, moved from the loop's list, all in one allocation.
    runs, in order, point into the copy and the blobs. shared_claim_free
@@ -430,4 +432,19 @@ int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) {
 }
 #else
 int64_t shared_send(int32_t fd, shared_bytes buf, int64_t skip) { (void)fd; (void)buf; (void)skip; return -38; }
+
+/* shared_claim_iov for WSASend. */
+int32_t shared_claim_wsabuf(const shared_claim *c, int64_t off, WSABUF *v, int32_t max) {
+    int32_t k = 0;
+    for (int64_t i = 0; i < c->nruns && k < max; i++) {
+        int64_t n = c->runs[i].n;
+        if (off >= n) {
+            off -= n;
+            continue;
+        }
+        v[k++] = (WSABUF){ (ULONG)(n - off), (char *)(c->runs[i].d + off) };
+        off = 0;
+    }
+    return k;
+}
 #endif
