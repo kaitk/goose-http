@@ -349,6 +349,24 @@ fn refusals() {
     feed(input);
 }
 
+fn field_limits() {
+    print("trailers past max_head, and a :path and a :method HTTP/1.1 refuses:");
+    session(http::Config { .. });
+    var input: u8[>..] = [];
+    opening(input, http::H2Settings { .. });
+    request(input, 1, "POST", "/echo", "", false);
+    var big: u8[>..] = [];
+    push_n(big, 'v', 9000);
+    var fb: u8[>..] = [];
+    http::hpack_encode(cenc, fb, "x-t", big);
+    http::h2_write_headers(input, 1, fb, true);
+    request(input, 3, "GET", "/a\x1b[31mb", "", true);
+    request(input, 5, "GET", "a", "", true);
+    request(input, 7, "G\x1b[2JET", "/", "", true);
+    request(input, 9, "OPTIONS", "*", "", true);
+    feed(input);
+}
+
 fn expectations() {
     print("100-continue, another expectation, and a handler that ends keep-alive:");
     session(http::Config { .. });
@@ -416,6 +434,7 @@ fn main() {
     flow_control();
     waiting();
     refusals();
+    field_limits();
     expectations();
     floods();
 }

@@ -72,6 +72,15 @@ upgrade, malformed requests, and too many streams:
   RST_STREAM 9 PROTOCOL_ERROR
   RST_STREAM 15 REFUSED_STREAM
   GOAWAY 0 PROTOCOL_ERROR last 15
+trailers past max_head, and a :path and a :method HTTP/1.1 refuses:
+  SETTINGS 0 4 values
+  WINDOW_UPDATE 0 +983041
+  SETTINGS 0 ACK 0 values
+  RST_STREAM 1 PROTOCOL_ERROR
+  RST_STREAM 3 PROTOCOL_ERROR
+  RST_STREAM 5 PROTOCOL_ERROR
+  RST_STREAM 7 PROTOCOL_ERROR
+  HEADERS 9 :status=404 server=goose content-type=text/plain content-length=0 END_STREAM
 100-continue, another expectation, and a handler that ends keep-alive:
   SETTINGS 0 4 values
   WINDOW_UPDATE 0 +983041

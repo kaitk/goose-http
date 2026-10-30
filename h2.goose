@@ -706,9 +706,11 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
         var expect = false;
         var unmet = false;
         let trailers = k >= 0;
+        // One byte of the block can stand for a table entry of 4 KB, so
+        // nothing is kept past max_head.
         let ok = hpack_decode(h.dec, fb, bhuff) { name, value =>
             size += name.len + value.len + 32;
-            if !bad {
+            if !bad && size <= cfg.max_head {
                 if name.len > 0 && name[0] == ':' {
                     if regular || trailers { bad = true; }
                     else if name == ":method" && m0 < 0 {
@@ -758,7 +760,7 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
         }
         if trailers {
             // A stream's second field block ends it (§8.1).
-            guard !bad && end_stream else {
+            guard !bad && end_stream && size <= cfg.max_head else {
                 reset(k, H2_PROTOCOL_ERROR);
                 return;
             }
@@ -780,8 +782,11 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
         let connect = m0 >= 0 && bpseudo[m0..m1] == "CONNECT";
         if m0 < 0 || (connect && (a0 < 0 || scheme || p0 >= 0)) || (!connect && (!scheme || p0 < 0 || p1 == p0)) {
             bad = true;
+        } else if !h2_request_ok(bpseudo[m0..m1], if connect { bpseudo[..0] } else { bpseudo[p0..p1] }, connect) {
+            bad = true;
         }
-        if bad {
+        // A head past max_head was kept only in part, and gets 431 below.
+        if bad && size <= cfg.max_head {
             h2_write_rst_stream(wbuf, id, H2_PROTOCOL_ERROR);
             remember_reset(id);
             return;
