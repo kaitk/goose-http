@@ -1079,7 +1079,9 @@ fn on_ack(ci: i64, s: i64, ranges: const QRange[:], largest: i64, delay: i64, no
     guard acked_any else { return true; }
     if newly_largest && largest_eliciting {
         let exp = if s == 2 { c.peer_params.ack_delay_exponent } else { 0 };
-        let delay_ms = if s == 2 { ((delay << exp) / 1000) } else { 0 };
+        // Past 2^40 a delay exceeds any max_ack_delay at every exponent (at
+        // most 20), and shifting more could wrap.
+        let delay_ms = if s == 2 { (min(delay, 1 << 40) << exp) / 1000 } else { 0 };
         rtt_sample(c, max(now - largest_time, 0), delay_ms, now);
     }
     detect_lost(ci, s, now);

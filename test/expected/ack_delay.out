@@ -1,0 +1,3 @@
+delay 0: srtt 40, rttvar 20, PTO 145
+delay 1152921504606846976: srtt 40, rttvar 15, PTO 125
+delay 4611686018427387903: srtt 40, rttvar 11, PTO 109
