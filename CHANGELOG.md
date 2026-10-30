@@ -2,6 +2,56 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.14 (2026-10-30)
+
+One message to many connections, worker addresses, and security fixes. Goose
+`v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`, and goose-compress `v0.1.4`. No
+breaking changes.
+
+Added:
+
+- Shared blobs (`import http.shared`): `http::shared_put` copies a message once into a
+  counted, generation-checked blob that any worker can send with `http::send_shared`,
+  from the blob itself, where every loop gathers it into its send; only what a socket
+  doesn't take is copied ([decisions](docs/decisions.md#shared-blobs-carry-one-message-to-many-workers),
+  [api](docs/api.md#shared-blobs)).
+- `http::worker_address()`, a worker's own address, whose mail calls the handler with
+  `WORKER`, and `http::wake(to, tag)`, which wakes one of the worker's own exchanges
+  without a mailbox slot ([decision](docs/decisions.md#a-worker-has-an-address-of-its-own-and-wakes-its-exchanges-locally),
+  [api](docs/api.md#worker-addresses)).
+
+Changed:
+
+- On epoll, a connection woken by mail isn't read again while its socket is known to be
+  empty.
+
+Fixed:
+
+- A reply to an HTTP/1.1 exchange that had ended could reach another client's h2
+  stream with the same key, and an h2 connection's streams that waited at once shared
+  one live key, so a reply to any but the last found it stale. Every exchange's key is
+  now its own ([decision](docs/decisions.md#an-h2-stream-is-an-exchange)).
+- An upgraded exchange's key stays live through `TIMEOUT`, as through `WAKE`.
+- h2 and HTTP/3 trailers are bounded by `Config.max_head`, and their `:method` and
+  `:path` are checked as HTTP/1.1's are.
+- `http::file_path` with an empty `dir`, the working directory, refuses a name that
+  starts at `/`, escaped or not.
+- HTTP/3: a stream or CRYPTO holds no more bytes than its limit; received and
+  acknowledged ranges never merge across a gap; the table of clients' first DCIDs is
+  keyed with a per-worker SipHash; the idle period restarts only past the handshake;
+  ACK Delay is capped before it's shifted; packets below dropped ACK ranges count as
+  duplicates; ACK-only packets aren't recorded; a closed stream leaves its connection's
+  ready list; a stopped request's bytes are credited once; and a datagram the kernel
+  refuses is dropped rather than stalling the worker's queue.
+
+On HttpArena's profiles in Docker Desktop on an M1 Pro, the goose entry on CPUs 0-2
+with the load on 3-9, one 5 s run a round, four rounds alternating with `v0.5.13`:
+baseline 612K to 670K requests a second against 587K to 656K, and pipelined,
+limited-conn, async, and baseline-h2 within the rounds' spread. Under cachegrind in an
+arm64 container, epoll `/plaintext` with one request in flight costs 3,181 to 3,182
+instructions a request, against 3,173 to 3,179 before the h2 key change and 3,179 to
+3,180 before d36d06c2.
+
 ## v0.5.13 (2026-10-27)
 
 A macOS build fix. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`, and

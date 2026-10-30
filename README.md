@@ -38,7 +38,7 @@ generation from OpenAPI, see [Plod](https://github.com/kaitk/plod).
 
 ## What it provides
 
-The latest tag, `v0.5.13`, provides all of this on every platform above:
+The latest tag, `v0.5.14`, provides all of this on every platform above:
 
 - A strict parser that guards against request smuggling and returns 414, 431, 501, and
   505 where appropriate; header fields, path, query, and percent-decoding support.
@@ -51,7 +51,8 @@ The latest tag, `v0.5.13`, provides all of this on every platform above:
   that checks the disk on every request.
 - Cookies, `Basic` authorization, media types, and `Accept` (406, 415).
 - Limits and timeouts per connection and per route, graceful shutdown, and an access log.
-- Deferred responses: waiting for another thread or a timer, long polling, and SSE.
+- Deferred responses: waiting for another thread or a timer, long polling, and SSE, with
+  one message sent to many connections from a single shared copy.
 - Client addresses, `Forwarded` headers from trusted proxies, IPv6, dual-stack, and, on
   Linux and macOS, Unix sockets.
 
@@ -72,7 +73,7 @@ a program also needs a C compiler and, on Linux, liburing:
 Save this as `hello.goose`:
 
 ```rust
-import http from "github.com/kaitk/goose-http@v0.5.13";
+import http from "github.com/kaitk/goose-http@v0.5.14";
 
 thread_fn worker(cfg: http::Config) {
     let e = http::serve(cfg) { req, body, out =>

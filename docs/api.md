@@ -581,7 +581,9 @@ for to in st.readers { http::wake(to, ev.tag); }
   for an exchange that doesn't wait. Past 512 wakes waiting, and from another
   thread, it's `mail_send`, and returns what that does.
 - The box has one key more than `Config.max_conns`, for the worker's address, so
-  `max_conns` stays below 2^20.
+  `max_conns` stays below 2^20. Where a listener may speak h2, it has one for each
+  stream the connections may open at once too, up to 2^20 keys in all
+  ([decision](decisions.md#an-h2-stream-is-an-exchange)).
 
 ### Lanes
 
