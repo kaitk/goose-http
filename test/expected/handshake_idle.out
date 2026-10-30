@@ -1,0 +1,3 @@
+after PINGs at 20, 25, and 29 s: up to packet 2 taken, idle at 30000 ms
+at 30 s: closed true
+past its handshake, after a PING at 20 s: idle at 50000 ms

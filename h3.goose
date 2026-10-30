@@ -1231,7 +1231,7 @@ fn h3_crypto_in(ci: i64, s: i64, now: i64) {
             }
             c.tx_max = c.peer_params.initial_max_data;
             if c.peer_params.max_idle_timeout > 0 {
-                c.idle_at = now + min(H3_IDLE_MS, c.peer_params.max_idle_timeout);
+                c.idle_at = min(c.idle_at, now + min(H3_IDLE_MS, c.peer_params.max_idle_timeout));
             }
         }
     }
@@ -1584,10 +1584,15 @@ fn h3_packet(ci: i64, h: const QHeader&, pkt: u8[:], pn_at: i64, now: i64) {
         c.sp[0].unacked = 0;
         c.pto_count = 0;
     }
-    c.idle_at = now + max(if c.peer_params.max_idle_timeout > 0 { min(H3_IDLE_MS, c.peer_params.max_idle_timeout) } else { H3_IDLE_MS },
-                          3 * pto_ms(c, 2));
     let eliciting = h3_frames(ci, s, pkt[hdr..hdr + n], now);
     let c2 .= h3conns[ci];
+    // A handshake has its idle period from the accept, however it
+    // progresses, as a TCP one has request_ms: anyone can make Initial
+    // packets, whose keys come from the client's DCID.
+    if c2.shaken {
+        c2.idle_at = now + max(if c2.peer_params.max_idle_timeout > 0 { min(H3_IDLE_MS, c2.peer_params.max_idle_timeout) }
+                               else { H3_IDLE_MS }, 3 * pto_ms(c2, 2));
+    }
     if eliciting && c2.state == H3_OPEN {
         let sp2 .= c2.sp[s];
         sp2.unacked++;
