@@ -75,9 +75,10 @@ inline fn shared_append(b: Shared, from: i64, to: i64, out: u8[>..]&) -> bool {
 }
 
 // Sends b's bytes from..to on an upgraded connection, as send does data;
-// after_drain counts them. A loop that gathers (each but Windows', without
-// TLS) keeps a reference until they're sent, and sends them from b with the
-// output; others copy them once into it. False, sending nothing, for a range outside b, a handle that
+// after_drain counts them. Through out on a plain socket, the loop keeps a
+// reference until they're sent, and sends them from b with the output; over
+// TLS, or into a buffer of the handler's own, they're copied once into it.
+// False, sending nothing, for a range outside b, a handle that
 // isn't a blob's, or a stream that isn't open and upgraded.
 fn send_shared(out: Reply, b: Shared, from: i64, to: i64) -> bool {
     let s .= out.stream;

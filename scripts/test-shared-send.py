@@ -5,7 +5,7 @@ piece for each of the client's frames, which the loop sends once a write buffer'
 deferred. Each loop gathers: it holds the ranges'
 references until it sends them (GATHERS=1, which the fixture asserts). LOOP=uring needs
 io_uring, and is skipped where the fixture finds none, as on macOS or under Docker's
-default seccomp profile."""
+default seccomp profile; on Windows it's IOCP, the only loop there."""
 import json
 import os
 from pathlib import Path
@@ -56,7 +56,8 @@ def fetch(port, path, stall, n):
 
 
 fixture = str(Path(sys.argv[1]).resolve())
-for loop in ("uring", "emulated", "epoll"):
+# Windows has one loop, the ring over IOCP.
+for loop in ("uring",) if sys.platform == "win32" else ("uring", "emulated", "epoll"):
     env = {**os.environ, "LOOP": loop, "GATHERS": "1"}
     with tempfile.TemporaryFile(mode="w+") as log:
         proc = subprocess.Popen([fixture], env=env, stdout=log, stderr=log)

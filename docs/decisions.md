@@ -1142,9 +1142,10 @@ Decided 2026-10-28, for Campfire's cable fan-out.
 `send_shared` on a plain socket doesn't copy the range into the output. The loop records
 it, retained, at its offset in the write buffer, and sends the buffer and the ranges
 together: one `sendmsg` of up to 64 runs on epoll, and a ring send that holds the
-ranges' references until its completion, or the connection's close, on io_uring and
-the emulated ring. Only what the socket doesn't take is copied, into the connection's
-pending output, as before.
+ranges' references until its completion, or the connection's close, on io_uring, the
+emulated ring, and IOCP, where it's a `WSASend` of up to 64 buffers (2026-10-30). Only
+what the socket doesn't take is copied, into the connection's pending output, as
+before.
 
 - The loop names its write buffer when it gathers, and `shared_defer` defers only into
   that buffer: a handler that builds a `Reply` around a buffer of its own, as Campfire

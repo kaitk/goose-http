@@ -433,12 +433,6 @@ int32_t ur_send(int64_t h, int32_t fd, uint64_t tag, ur_bytes data) {
     return 0;
 }
 
-/* Gathers sends here: ring.goose's ring_gathers. */
-uint8_t ur_gathers(int64_t h) {
-    (void)h;
-    return 1;
-}
-
 /* Queues a send of data and the ranges shared_defer deferred into it, with
    one sendmsg a step, behind the sends on fd before it, and takes the
    ranges' references (shim/shared.c), which the record holds until its last
