@@ -343,7 +343,9 @@ fn rx_put(r: H3Rx&, off: i64, bytes: const u8[:]) -> bool {
             run_shift(r.data, from, min(r.high - r.read, r.data.cap - from));
             r.start = r.read;
         }
-        if end - r.start > r.data.cap { run_grow(r.data, max(max(end - r.start, 2 * r.data.cap), 512)); }
+        if end - r.start > r.data.cap {
+            run_grow(r.data, min(max(max(end - r.start, 2 * r.data.cap), 512), r.max - r.start));
+        }
     }
     let at = r.data.at + lo - r.start;
     net_copy(h3bytes[at..at + end - lo], bytes[lo - off..]);
@@ -798,7 +800,10 @@ fn h3_accept(ctx: tls::Context, k: i64, h: const QHeader&, peer: const UdpPeer&,
     for b in h.scid { c.client_scid.push(b); c.dcid.push(b); }
     c.odcid_key = h3_odcid_key(h.dcid);
     c.idle_at = now + H3_IDLE_MS;
-    for &s in c.sp { s.crypto_rx.max = 1 << 16; }
+    // A ClientHello and the client's Handshake flight need a few KB, and an
+    // Initial from any address can have this held until the idle timeout
+    // (RFC 9000, section 7.5, asks for 4,096 bytes).
+    for &s in c.sp { s.crypto_rx.max = 1 << 14; }
     h3by_cid.insert(cid, ci as i32);
     h3by_odcid.insert(c.odcid_key, ci as i32);
     h3open++;

@@ -1,0 +1,3 @@
+Initial CRYPTO bytes at the limit - 2 and - 1: run 16384 bytes, limit 16384
+an Initial CRYPTO byte at the limit: taken false
+stream bytes at 1 MiB - 2 and - 1: run 1048576 bytes, limit 1048576
