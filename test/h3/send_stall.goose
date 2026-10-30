@@ -9,10 +9,17 @@ import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 import http.h3;
 
-fn loopback(port: i32) -> http::UdpPeer {
+// 127.0.0.1:port as the kernel takes it: AF_INET is a byte after the
+// address's length on macOS, and two bytes, little-endian, on Linux, which
+// refuses the macOS form.
+fn loopback(port: i32, macos: bool) -> http::UdpPeer {
     var p = http::UdpPeer { len: 16, addr: [0; 28] };
-    p.addr[0] = 16;
-    p.addr[1] = 2;
+    if macos {
+        p.addr[0] = 16;
+        p.addr[1] = 2;
+    } else {
+        p.addr[0] = 2;
+    }
     p.addr[2] = ((port >> 8) & 255) as u8;
     p.addr[3] = (port & 255) as u8;
     p.addr[4] = 127;
@@ -26,9 +33,12 @@ fn main() {
     let rfd = http::net_udp_open(any, 0, 0);
     assert(fd >= 0 && rfd >= 0);
     http::h3fds.push(fd);
-    let good = loopback(http::net_port(rfd));
-    let refused = loopback(0);
     let dg: u8[1200] = [7; 1200];
+    // Which form, from a datagram to the sender's own port.
+    let one: i32[1] = [1];
+    let macos = http::net_udp_send(fd, dg[..1], one, [loopback(http::net_port(fd), true)], false) == 1;
+    let good = loopback(http::net_port(rfd), macos);
+    let refused = loopback(0, macos);
     assert(http::h3_tx_begin(0, refused));
     http::h3_tx_end(0, refused, dg);
     for i in 3 {
