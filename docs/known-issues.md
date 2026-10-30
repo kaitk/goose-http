@@ -237,7 +237,8 @@ its references (2026-10-30).
   under valgrind, so cachegrind, which writes its counts at exit, gives none there;
   callgrind does, with `callgrind_control -d`, but only for some builds: d36d06c2's
   and d81c640c's servers ran out of address space at their first request, with
-  137 GB mapped, while 474187c8's served 1,300 requests. Both servers run under
+  137 GB mapped, and 4e7eaec3's ended at its first, while 474187c8's and bd6a7d2a's
+  served 1,300 requests. Both servers run under
   `--tool=none` and natively, so the limit is callgrind's, and an io_uring
   comparison needs both builds to pass under it.
 
