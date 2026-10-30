@@ -118,8 +118,6 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         close_listeners();
         return Error { call: "io_uring", code: -r };
     }
-    // Whether shared ranges go out from their blobs (ring_send_shared).
-    let gathers = ring_gathers(r);
     let waker = ring_waker(r, RING_WAKE);
     guard waker >= 0 else {
         close_listeners();
@@ -454,7 +452,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     // while handlers answer here: pump flushes them all before it returns.
     fn feed(c: RingConn<S>&, buf: i32, src: const u8[:], n: i64, wake: const Event&) {
         if c.h2 >= 0 { pump_h2(c, buf, src, n, wake); return; }
-        shared_gather(gathers && c.tls < 0);
+        shared_gather(c.tls < 0);
         pump(c, buf, src, n, wake);
         shared_gather(false);
     }
