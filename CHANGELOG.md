@@ -2,6 +2,30 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.16 (2026-10-30)
+
+A security fix for replies held long. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
+`v0.0.6`, and goose-compress `v0.1.4`. No breaking changes.
+
+Fixed:
+
+- An exchange's `later` address no longer repeats: its key's 24-bit generation repeated
+  after 2^24 accepts on one worker, or 2^24 h2 streams, and its request number after
+  2^20 requests on one connection, so a reply held that long, as a subscriber list or
+  a long poll holds one, could reach a later exchange, another client's after the
+  accepts or streams. A key's 44 bits below
+  its slot are now one number per worker, which a connection draws as it opens, each
+  request on it counts up, and an h2 stream draws for itself, so none repeats in its
+  slot until the worker has counted 2^44 requests and streams
+  ([decision](docs/decisions.md#a-later-keys-number-doesnt-repeat-in-its-slot)).
+
+Added:
+
+- `out.stream.later`, the exchange's address, is set from its first call to its last
+  over HTTP/1.1, h2, and HTTP/3, and no other exchange of the worker has its key
+  meanwhile, so a program can key its own per-exchange state by it
+  ([api](docs/api.md#answers-that-wait)).
+
 ## v0.5.15 (2026-10-30)
 
 A fix for programs run through the JIT. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
