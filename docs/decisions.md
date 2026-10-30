@@ -1237,6 +1237,34 @@ Rejected: deferring into any `Reply`'s buffer by offset, the first version, whic
 ranges in the loop's output at another buffer's offsets when a handler's buffer wasn't
 the loop's. `MSG_ZEROCOPY` wasn't tried.
 
+## A worker has an address of its own, and wakes its exchanges locally
+
+Decided 2026-10-28, for Campfire's cable fan-out; local wakes go right after the
+worker's mail since 2026-10-29.
+
+A worker's box has one key past its connections' slots, `worker_address()`, whose mail
+calls the handler with `WORKER`. `wake(to, tag)` from the worker that owns `to` queues
+the wake in the loop instead of the box, and the loop delivers it once the call that
+asked returns, right after the worker's mail or at the end of the pass.
+
+- A publisher mails each worker once, not one exchange per worker chosen to stand for
+  it, so nothing has to hand that role on when the exchange ends.
+- A wake to one's own exchange needs no slot, so the box is sized for the publisher's
+  mail alone. It is checked as a send is, against the live key, and the loop checks
+  the whole key again when it delivers.
+- Programs that never call `wake` pay a length check per pass.
+
+Why: Campfire's broker had mailed one representative connection per worker, which
+then kicked the others through the box. With worker addresses and local wakes, and
+the empty-socket recv skip, its 2,000-reader saturated fan-out rose 11% with 7% less
+CPU per message, and the box shrank from 2,048 slots to 512. Delivering the wakes
+right after the mail cut its 64-reader delivery p99 from 8.26 to 4.14 ms (5800X3D,
+once-campfire-goose `a62f2f8` and `d1e12a1`).
+
+Rejected: waking through `mail_send` to one's own box, which needs a slot per wake;
+and delivering wakes only at the end of a pass, which left them behind every other
+event in it.
+
 ## Not yet decided
 
 ### Compression in an optional module

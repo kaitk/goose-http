@@ -483,8 +483,13 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         touch(c);
     }
 
-    // A message to key, for the exchange that waits for it, if any.
+    // A message to key, for the exchange that waits for it, if any, or for
+    // the worker.
     fn delivered(key: u64, tag: i32, bytes: const u8[:]) {
+        if key == worker_key(cfg) {
+            call_worker(fresh, tag, bytes, H);
+            return;
+        }
         let i = later_slot(key);
         guard i < conns.len else { return; }
         let c .= conns[i];
@@ -713,6 +718,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
     }
 
+
     // The loop, until a call fails or a stop ends it: then the error, or one
     // with code 0, is returned from here.
     fn spin() -> Error {
@@ -720,7 +726,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             // A wait ends within a second, for the sweep and a stopped
             // accept's retry, or at the next timer; the waker ends it for
             // mail and a stop.
-            var timeout: i32 = if overdue.len > 0 { 0 } else { wait_for(timers, now) };
+            var timeout: i32 = if overdue.len > 0 || woken_n > 0 { 0 } else { wait_for(timers, now) };
             if h3_serves(tls) { timeout = h3_wait(tls, now, timeout); }
             let n = ring_wait(r, done, timeout);
             if n == -EINTR { continue; }
@@ -740,7 +746,8 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                     continue;
                 }
                 if cq.tag == RING_WAKE {
-                    if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; }
+                    // A worker's mail asks its wakes now, as mail did, not after the pass's other events.
+                    if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; wake_all() { key, tag => delivered(key, tag, ""); }; }
                     continue;
                 }
                 let i = (cq.tag & 0xFFFFFFFF) as i64;
@@ -774,6 +781,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             let owed = overdue.len;
             for k in owed { timed_out(overdue[k], false); }
             drop_first(overdue, owed);
+            wake_all() { key, tag => delivered(key, tag, ""); };
             let tick = now >= next_sweep;
             if tick {
                 sweep();

@@ -18,6 +18,9 @@ python3 "$root/scripts/test-later-keys.py" "$root/build/later-keys"
 "$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/shared-send" \
     "$root/scripts/fixtures/shared_send.goose"
 python3 "$root/scripts/test-shared-send.py" "$root/build/shared-send"
+"$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/worker-mail" \
+    "$root/scripts/fixtures/worker_mail.goose"
+python3 "$root/scripts/test-worker-mail.py" "$root/build/worker-mail"
 if [ "$(uname -s)" = Linux ]; then
     "$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/drain" "$root/examples/drain.goose"
     python3 "$root/scripts/test-drain.py" "$root/build/drain"

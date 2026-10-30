@@ -264,6 +264,9 @@ let TIMEOUT: u8 = 7;
 // after_drain's output reached the socket. The exchange's mailbox wait, if
 // any, remains armed. CLOSED replaces this event if the connection fails.
 let DRAINED: u8 = 8;
+// Mail to the worker's own address (worker_address): ev.data and ev.tag are
+// what was sent, and the call belongs to no exchange.
+let WORKER: u8 = 9;
 // TIMEOUT's tag when the exchange found no room to wait, and got it at once.
 let NO_ROOM: i32 = 1;
 // No event, for answer's wake.
@@ -360,8 +363,68 @@ fn holds_input(x) -> bool { return x.stream.waiting && x.body != BodyReader.Raw;
 // table has cfg.max_waiting cells with a box, and none without.
 fn open_waiting(cfg: const Config&, waker: i64) -> Box, Error {
     guard cfg.mail_slots > 0 && cfg.max_waiting > 0 else { return Box { .. }, Error { call: "", code: 0 }; }
-    guard cfg.max_conns <= 1 << 20 else { return Box { .. }, Error { call: "max_conns", code: EINVAL }; }
-    return mail_open(cfg.mail_slots, cfg.mail_size, waker, cfg.max_conns as i32, 44);
+    guard cfg.max_conns < 1 << 20 else { return Box { .. }, Error { call: "max_conns", code: EINVAL }; }
+    // A key for each connection's slot, and the worker's own past them.
+    let b, err = mail_open(cfg.mail_slots, cfg.mail_size, waker, cfg.max_conns as i32 + 1, 44);
+    if err.code == 0 {
+        mail_mark(b, worker_key(cfg), true);
+        wake_box = b.handle;
+        worker_to = MailAddress { box: b.handle, key: worker_key(cfg) };
+    }
+    return b, err;
+}
+
+// The worker's key in its loop's box: the slot past every connection's.
+fn worker_key(cfg: const Config&) -> u64 { (cfg.max_conns as u64) << 44 }
+
+// A loop's own box and address, in its thread, and the wakes its handlers
+// asked for: woken[..woken_n] holds pairs of an exchange's key and a tag. It
+// has a fixed capacity, so a program that never wakes reserves no data stack
+// for it, and the loop never shrinks it, only woken_n: a loop that holds
+// references, as h3's does, may not shrink a global (§5.1).
+let WAKES = 1024;
+var wake_box = Handle { .. };
+var worker_to = MailAddress { .. };
+var woken: u64[..WAKES] = [];
+var woken_n = 0;
+
+fn woken_put(v: u64) {
+    if woken_n < woken.len { woken[woken_n] = v; } else { woken.push(v); }
+    woken_n++;
+}
+
+// Calls F with each wake asked so far, a key and a tag, and keeps those
+// asked meanwhile for the next call.
+fn wake_all<F>() {
+    guard woken_n > 0 else { return; }
+    let asked = woken_n;
+    for k in asked / 2 { F(woken[2*k], woken[2*k+1] as! u32 as i32); }
+    let more = woken_n - asked;
+    for k in more { woken[k] = woken[asked + k]; }
+    woken_n = more;
+}
+
+// The address of the calling handler's worker itself, for as long as its loop
+// runs: mail to it calls the handler with WORKER, the message's tag and bytes,
+// a copy of fresh for that call, and a reply that sends nothing. A publisher can then address a worker without picking one of its
+// exchanges. Outside a loop, or in one with no box (Config.mail_slots or
+// max_waiting 0), it's an address every send finds STALE.
+fn worker_address() -> MailAddress { worker_to }
+
+// Wakes the exchange that waits at to with tag and no bytes, as
+// mail_send(to, tag, "") does. From the worker whose box to is, it takes no
+// slot: the loop calls the exchange once the call that asked returns, right
+// after the worker's mail, or at the end of a pass of events. Past WAKES / 2
+// wakes waiting, and from another thread, it's mail_send. Returns SENT, or
+// STALE for an exchange that doesn't wait; otherwise what mail_send returns.
+fn wake(to: MailAddress, tag: i32) -> i32 {
+    guard to.box.slot >= 0 && key_of(to.box) == key_of(wake_box) && woken_n + 2 <= WAKES else {
+        return mail_send(to, tag, "");
+    }
+    guard mail_live(to) else { return STALE; }
+    woken_put(to.key);
+    woken_put(tag as! u32);
+    return SENT;
 }
 
 // mail_open_code (mail.goose), with its error as an Error.
@@ -373,6 +436,9 @@ fn mail_open(slots: i32, size: i32, waker: i64 = 0, live_keys: i32 = 0, key_shif
 // Closes a loop's box, or its waker when it has none, after unlisting the
 // waker for stop.
 fn close_waiting(b: Box, waker: i64) {
+    wake_box = Handle { .. };
+    worker_to = MailAddress { .. };
+    woken_n = 0;
     net_stop_unwatch(waker);
     if b.handle.slot >= 0 { mail_close(b); } else { net_waker_close(waker); }
 }
@@ -426,6 +492,20 @@ struct Exchange<S> {
     stream: Stream,
     timer: Handle = Handle { .. },  // the time limit of the wait later asked for
     state: S,
+}
+
+// Calls H with WORKER, for mail to the worker's own address
+// (worker_address), with a copy of fresh and a reply that sends nothing. Its
+// own locals, so a loop whose program never mails its worker holds no state
+// or buffer for it.
+fn call_worker<S, H>(fresh: const S&, tag: i32, bytes: const u8[:]) {
+    var state = fresh;
+    var sink: u8[>..] = [];
+    var stream = Stream { .. };
+    var keep = false;
+    let none = Request { .. };
+    H(Event { kind: WORKER, req: none, data: bytes, whole: false, trailers: "", tag: tag }, &state,
+      Reply { buf: sink, common: "", keep_alive: keep, minor: 1, head: false, stream: stream });
 }
 
 // Calls H with CLOSED for c's exchange, if it was owed another call.

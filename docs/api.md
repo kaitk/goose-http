@@ -288,6 +288,7 @@ thread_fn worker(cfg: http::Config) {
 | `WAKE` | A message came to the address `later` returned: its bytes in `ev.data`, its tag in `ev.tag`. ([Answers that wait](#answers-that-wait)) |
 | `TIMEOUT` | `later`'s time limit passed first, or there was no room to wait, which `ev.tag == http::NO_ROOM` says. |
 | `DRAINED` | An upgraded connection's output that `after_drain` asked about has reached the socket. ([WebSocket](#websocket)) |
+| `WORKER` | Mail came to the worker's own address, `http::worker_address()`: its bytes in `ev.data`, its tag in `ev.tag`. It belongs to no exchange. ([Worker addresses](#worker-addresses)) |
 | `DONE` | With `Config.log`, the response is whole: `ev.status`, `ev.sent` bytes, and `ev.ms` from the head's first byte, for an access log. `ev.req` is the request only when it was answered at `REQUEST`. |
 
 - `http::begin(out, status, length)` opens a response: `Content-Length`, or chunked
@@ -557,6 +558,30 @@ http::shared_release(b);
 - A handle is checked as `handle.goose`'s are: one used after its blob's last
   release, or one never put, is refused, even once its slot holds another blob,
   rather than read. A blob's bytes never change.
+
+### Worker addresses
+
+A publisher that serves readers on several workers can mail each worker once, rather
+than one of each worker's exchanges, and let the worker wake its own readers.
+
+```rust
+// In each worker, once: tell the publisher where it is.
+http::mail_send_value(publisher, HELLO, http::worker_address());
+// At WORKER: wake the readers this message is for, without a mailbox slot each.
+for to in st.readers { http::wake(to, ev.tag); }
+```
+
+- `http::worker_address()` is the calling worker's own address while its loop runs,
+  in a loop with a box. Mail to it calls the handler with `WORKER`, with a copy of
+  `fresh` for that call, and a reply that sends nothing: keep the worker's own state
+  in the worker thread's locals or globals.
+- `http::wake(to, tag)` is `http::mail_send(to, tag, "")`, but from the worker that
+  owns `to` it takes no slot: the exchange gets `WAKE` once the call that asked
+  returns, right after the worker's mail or at the end of the loop's pass. `STALE`
+  for an exchange that doesn't wait. Past 512 wakes waiting, and from another
+  thread, it's `mail_send`, and returns what that does.
+- The box has one key more than `Config.max_conns`, for the worker's address, so
+  `max_conns` stays below 2^20.
 
 ### Lanes
 

@@ -644,8 +644,13 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
     }
 
-    // A message to key, for the exchange that waits for it, if any.
+    // A message to key, for the exchange that waits for it, if any, or for
+    // the worker.
     fn delivered(key: u64, tag: i32, bytes: const u8[:]) {
+        if key == worker_key(cfg) {
+            call_worker(fresh, tag, bytes, H);
+            return;
+        }
         let i = later_slot(key);
         guard i < conns.len else { return; }
         if conns[i].h2 >= 0 {
@@ -696,12 +701,13 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         resume(i, ev);
     }
 
+
     var hot = false;
     var failed = Error { call: "", code: 0 };
     loop {
         // A wait ends within a second, for the sweep and a paused accept's
         // retry, or at the next timer; the waker ends it for mail and a stop.
-        var timeout: i32 = if hot || overdue.len > 0 || turns.len > 0 { 0 } else { wait_for(timers, now) };
+        var timeout: i32 = if hot || overdue.len > 0 || turns.len > 0 || woken_n > 0 { 0 } else { wait_for(timers, now) };
         if h3_serves(tls) { timeout = h3_wait(tls, now, timeout); }
         let n = net_epoll_wait(ep, events, timeout);
         if n == -EINTR { continue; }
@@ -724,7 +730,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 continue;
             }
             if ev.tag == EPOLL_WAKE {
-                if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; }
+                // A worker's mail asks its wakes now, as mail did, not after the pass's other events.
+                if waiting { mail_take(box) { key, tag, bytes => delivered(key, tag, bytes); }; wake_all() { key, tag => delivered(key, tag, ""); }; }
                 continue;
             }
             if h3_serves(tls) {
@@ -755,6 +762,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             if conns[i].fd >= 0 && conns[i].ready { go(i, true, none); }
         }
         drop_first(turns, listed);
+        wake_all() { key, tag => delivered(key, tag, ""); };
         if h3_serves(tls) { h3_tick(tls, cfg, fresh, common, now, H); }
         if waiting { expire(timers, now) { key => timed_out(key, true); }; }
         // With or without a box: without one, every later is owed its TIMEOUT.
