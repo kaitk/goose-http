@@ -61,6 +61,19 @@ a stream that waits holds back no other:
   (handler: TIMEOUT)
   HEADERS 1 :status=200 server=goose content-type=text/plain content-length=6
   DATA 1 6 'waited' END_STREAM
+streams that wait at once, each live until it ends:
+  SETTINGS 0 4 values
+  WINDOW_UPDATE 0 +983041
+  SETTINGS 0 ACK 0 values
+  live: true and true
+  (handler: WAKE)
+  HEADERS 1 :status=200 server=goose content-type=text/plain content-length=6
+  DATA 1 6 'waited' END_STREAM
+  then sends to streams 1 and 3: STALE, SENT
+  (handler: WAKE)
+  HEADERS 3 :status=200 server=goose content-type=text/plain content-length=6
+  DATA 3 6 'waited' END_STREAM
+  then sends to streams 1 and 3: STALE, STALE
 upgrade, malformed requests, and too many streams:
   SETTINGS 0 4 values
   WINDOW_UPDATE 0 +983041

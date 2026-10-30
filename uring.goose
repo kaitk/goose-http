@@ -171,8 +171,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     reusable[] var spill: u8[>..] = [];
     reusable var conns: RingConn<S>[>..] = [];
     var open = 0;
-    // The generation of each connection and h2 stream: one counter, so no
-    // stream's key repeats an earlier connection's in its slot (later_base).
+    // The generation of each connection and h2 stream (later_base).
     var generation: u64 = 0;
     var closed = false;
     // h2c's connections and streams, empty unless a listener serves h2c;
@@ -260,8 +259,13 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         let c .= conns[i];
         // Before CLOSED, whose handler may hang up a socket that a poll
         // would hold open. Only an exchange that waits has one armed, and
-        // any of an h2c connection's streams may.
-        if c.x.stream.waiting || c.h2 >= 0 { ring_disarm(r, c.x.stream.later.key, SLOT_BITS); }
+        // any of an h2 connection's streams may, for its own key.
+        if c.x.stream.waiting { ring_disarm(r, c.x.stream.later.key, SLOT_BITS); }
+        if c.h2 >= 0 {
+            for k in h2conns[c.h2].streams {
+                if h2streams[k].x.stream.waiting { ring_disarm(r, h2streams[k].x.stream.later.key, ~0); }
+            }
+        }
         abandon(c, H);
         cancel(timers, c.x.timer);
         if c.h2 >= 0 {
@@ -488,20 +492,22 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             call_worker(fresh, tag, bytes, H);
             return;
         }
-        let i = later_slot(key);
-        guard i < conns.len else { return; }
-        let c .= conns[i];
-        if c.h2 >= 0 {
-            let k = h2_key_index(key);
-            guard c.fd >= 0 && c.state == OPEN && k < h2streams.len && h2_waits_for(h2streams[k], i, key) else { return; }
+        let k = h2_key_index(cfg.max_conns, key);
+        if k >= 0 {
+            guard k < h2streams.len && h2_waits_for(h2streams[k], key) else { return; }
+            let s .= conns[h2streams[k].slot];
+            guard s.fd >= 0 && s.state == OPEN else { return; }
             cancel(timers, h2streams[k].x.timer);
             h2streams[k].x.stream.waiting = false;
             wake_at = k;
             let ev = Event { kind: WAKE, req: nothing, data: bytes, whole: false, trailers: "", tag: tag };
-            resume(c, ev);
+            resume(s, ev);
             wake_at = -1;
             return;
         }
+        let i = later_slot(key);
+        guard i < conns.len else { return; }
+        let c .= conns[i];
         guard waits_for(c, key) else { return; }
         cancel(timers, c.x.timer);
         c.x.stream.waiting = false;
@@ -512,24 +518,26 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     // The exchange of key, which waited, or wanted to and found no timer,
     // is owed TIMEOUT.
     fn timed_out(key: u64, waited: bool) {
-        let i = later_slot(key);
-        guard i < conns.len else { return; }
-        let c .= conns[i];
-        if c.h2 >= 0 {
-            let k = h2_key_index(key);
-            guard c.fd >= 0 && c.state == OPEN && k < h2streams.len else { return; }
+        let k = h2_key_index(cfg.max_conns, key);
+        if k >= 0 {
+            guard k < h2streams.len else { return; }
             let st .= h2streams[k];
-            guard st.slot == i && st.id > 0 && st.x.stream.later.key == key && st.x.stream.waiting == waited else { return; }
+            guard st.id > 0 && st.x.stream.later.key == key && st.x.stream.waiting == waited else { return; }
+            let s .= conns[st.slot];
+            guard s.fd >= 0 && s.state == OPEN else { return; }
             st.x.stream.waiting = false;
             retire(st.x.stream);
             wake_at = k;
             let ev = Event { kind: TIMEOUT, req: nothing, data: "", whole: false, trailers: "",
                              tag: if waited { 0 } else { NO_ROOM } };
-            resume(c, ev);
+            resume(s, ev);
             wake_at = -1;
             return;
         }
-        guard c.fd >= 0 && c.state == OPEN && c.x.stream.later.key == key && c.x.stream.waiting == waited else { return; }
+        let i = later_slot(key);
+        guard i < conns.len else { return; }
+        let c .= conns[i];
+        guard c.fd >= 0 && c.state == OPEN && c.h2 < 0 && c.x.stream.later.key == key && c.x.stream.waiting == waited else { return; }
         c.x.stream.waiting = false;
         // An upgraded exchange's TIMEOUT is a tick that ends nothing: its key stays live through the
         // handler, as through WAKE, so a publisher's mail_live finds it; answer retires it after.

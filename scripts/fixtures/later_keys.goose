@@ -1,9 +1,11 @@
 // An HTTP/1.1 exchange's lane reply after its client has gone, and h2c
 // streams of a later connection in the same slot: the reply must find
-// none of them. /slow hands its address to a lane that replies 300 ms
-// later and prints what the send returned; /wait waits 1 s and answers its
-// WAKE with the bytes, or TIMEOUT. LOOP picks the loop: epoll, uring
-// (io_uring, required), emulated, or serve's own choice otherwise.
+// none of them. And h2c streams that wait at once: a reply finds each
+// until it ends. /slow hands its address to a lane that replies 300 ms
+// later and again 300 ms after that, and prints what each send returned;
+// /wait waits 1 s and answers its WAKE with the bytes, or TIMEOUT. LOOP
+// picks the loop: epoll, uring (io_uring, required), emulated, or serve's
+// own choice otherwise.
 import std;
 import os;
 import http from "../../";
@@ -14,9 +16,11 @@ thread_fn slow_lane(box: http::Box) {
     http::lane(box) { tag, bytes =>
         var j = Job { .. };
         if http::mail_value(bytes, j) {
-            sleep_ms(300);
-            let r = http::mail_send(j.reply, 9, "for the gone client");
-            print(if r == http::SENT { "lane: sent" } else if r == http::STALE { "lane: stale" } else { "lane: other" });
+            for i in 2 {
+                sleep_ms(300);
+                let r = http::mail_send(j.reply, 9, "from the lane");
+                print(if r == http::SENT { "lane: sent" } else if r == http::STALE { "lane: stale" } else { "lane: other" });
+            }
         }
     };
 }

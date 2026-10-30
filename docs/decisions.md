@@ -461,10 +461,16 @@ Decided 2026-10-19, task 014.01.
 Each stream is one exchange with its own state, called with the events an HTTP/1.1
 exchange gets. A stream's body comes as HTTP/1.1's does: whole at REQUEST when it
 fits in the read buffer, else in pieces, so the route chooses between gathering it and
-reading it in pieces as before. `later`'s key gives its low 20 bits, an HTTP/1.1
-exchange's number, to the stream's index in the stream pool, and the 24 bits of
-generation to the stream, so a reply finds its stream and no other. A stream that
-waits holds back no other stream.
+reading it in pieces as before. A stream's `later` key puts its index in the stream
+pool where an HTTP/1.1 key has its connection's slot, past every slot and the
+worker's, and takes its 24 bits of generation from the counter connections draw
+theirs from, so a reply finds its stream and no other. The slot bits pick a key's
+live entry in the loop's box, so each waiting stream has an entry of its own: with
+the connection's slot, the streams of one connection shared an entry, and each
+stream's `later` made the one before it unreachable (2026-10-30). The box keeps an
+entry for each stream the connections may have open at once, up to the 20 bits'
+reach, only where a listener may speak h2; a stream past that reach is refused with
+`REFUSED_STREAM`. A stream that waits holds back no other stream.
 
 ## TLS is goose-tls, reached from the module http.tls
 

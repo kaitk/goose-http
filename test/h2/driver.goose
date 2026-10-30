@@ -1,7 +1,7 @@
 // The h2c driver, h2_answer, fed a client's bytes without a socket: the
 // preface and settings, requests whole and with bodies, a response sent in
 // pieces, a response's fields translated, flow control at a small window, a stream that waits while another
-// is answered, upgrade answering 501, malformed requests, Expect, a handler
+// is answered, streams that wait at once, upgrade answering 501, malformed requests, Expect, a handler
 // that ends keep-alive, and the flood guards. Each frame the server writes is printed, its Date left out.
 import std;
 import http from "../../";
@@ -319,9 +319,41 @@ fn waiting() {
     assert(overdue.len == 1);
     let key = overdue[0];
     overdue.clear();
-    let at = http::h2_key_index(key);
+    let at = http::h2_key_index(cfg.max_conns, key);
     assert(streams[at].id == 1 && !streams[at].x.stream.waiting);
     feed("", http::TIMEOUT, at);
+}
+
+fn sent(r: i32) -> const u8[:] { if r == http::SENT { "SENT" } else if r == http::STALE { "STALE" } else { "other" } }
+
+// Streams of one connection that wait at once, with a box: each one's key is
+// live until it ends, whichever waited last, and STALE after.
+fn waiting_streams() {
+    print("streams that wait at once, each live until it ends:");
+    session(http::Config { h2c: true, max_conns: 4, mail_slots: 8, max_waiting: 8, .. });
+    let box, err = http::open_waiting(cfg, 0);
+    assert(err.code == 0);
+    conn.x.stream.later = http::MailAddress { box: box.handle, key: http::later_base(0, 1) };
+    timers = http::timer_table(cfg.max_waiting);
+    var input: u8[>..] = [];
+    opening(input, http::H2Settings { .. });
+    request(input, 1, "GET", "/wait", "", true);
+    request(input, 3, "GET", "/wait", "", true);
+    feed(input);
+    let first = conns[h].streams[0] as i64;
+    let second = conns[h].streams[1] as i64;
+    let a = streams[first].x.stream.later;
+    let b = streams[second].x.stream.later;
+    print("  live: ", http::mail_live(a), " and ", http::mail_live(b));
+    // As the loop's delivered does.
+    for k in [first, second] {
+        http::cancel(timers, streams[k].x.timer);
+        streams[k].x.stream.waiting = false;
+        feed("", http::WAKE, k);
+        print("  then sends to streams 1 and 3: ", sent(http::mail_send(a, 0, "")), ", ", sent(http::mail_send(b, 0, "")));
+    }
+    http::mail_close(box);
+    timers = http::timer_table(0);
 }
 
 fn refusals() {
@@ -433,6 +465,7 @@ fn main() {
     translation();
     flow_control();
     waiting();
+    waiting_streams();
     refusals();
     field_limits();
     expectations();

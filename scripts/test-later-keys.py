@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """A lane's reply to an HTTP/1.1 exchange whose client has gone is STALE, and reaches no h2c
 stream of a later connection in the same slot, whatever generations and pool indexes the streams
-get. With a generation counter of their own, stream 5's key was the gone exchange's. LOOP=uring
-needs io_uring, and is skipped where the fixture finds none."""
+get. With a generation counter of their own, stream 5's key was the gone exchange's. And a reply
+reaches an h2c stream that waits while a later stream of its connection waits too, and is STALE
+once the stream has ended. LOOP=uring needs io_uring, and is skipped where the fixture finds
+none."""
 import json
 import os
 from pathlib import Path
@@ -71,6 +73,17 @@ def attack(port):
     return got
 
 
+def both_wait(port):
+    # Stream 1 hands its address to the lane, and stream 3 waits after it. With one live entry
+    # for the connection's slot, stream 3's later made stream 1's key stale.
+    s = socket.create_connection(("127.0.0.1", port + 1))
+    s.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(4, 0, 0, b""))
+    s.sendall(frame(1, 5, 1, headers("/slow")) + frame(1, 5, 3, headers("/wait")))
+    got = data_frames(read_for(s, 1.5))
+    s.close()
+    return got
+
+
 fixture = str(Path(sys.argv[1]).resolve())
 for loop in ("uring", "emulated", "epoll"):
     with tempfile.TemporaryFile(mode="w+") as log:
@@ -91,10 +104,12 @@ for loop in ("uring", "emulated", "epoll"):
                 print(json.dumps({"loop": loop, "later_keys": "skipped: no io_uring here"}), flush=True)
                 continue
             got = attack(port)
+            both = both_wait(port)
             log.seek(0)
             lines = [l for l in log.read().splitlines() if l.startswith("lane: ")]
-            assert lines == ["lane: stale"], (loop, lines)
+            assert lines == ["lane: stale", "lane: stale", "lane: sent", "lane: stale"], (loop, lines)
             assert sorted(got) == [(1, b"timeout"), (3, b"timeout")], (loop, got)
+            assert sorted(both) == [(1, b"from the lane"), (3, b"timeout")], (loop, both)
             print(json.dumps({"loop": loop, "later_keys": "ok"}), flush=True)
         finally:
             if proc.poll() is None:

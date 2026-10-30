@@ -341,9 +341,10 @@ fn retire(s: Stream&) {
 
 // A Later's key: the connection's slot, 24 bits of its generation, and 20 of
 // the exchange's number, so a message for a closed connection, or an
-// exchange that has ended, matches no exchange that waits. Connections and
-// h2 streams draw their generations from one counter per loop: with one of
-// their own, a stream's key could repeat a gone HTTP/1.1 exchange's.
+// exchange that has ended, matches no exchange that waits. The slot picks
+// the key's live entry in the loop's box; an h2 stream has an entry of its
+// own past the slots (h2_key). Connections and h2 streams draw their
+// generations from one counter per loop.
 fn later_base(slot: i64, gen: u64) -> u64 { ((slot as u64) << 44) | ((gen & 0xFFFFFF) << 20) }
 fn later_slot(key: u64) -> i64 { (key >> 44) as i64 }
 
@@ -364,8 +365,10 @@ fn holds_input(x) -> bool { return x.stream.waiting && x.body != BodyReader.Raw;
 fn open_waiting(cfg: const Config&, waker: i64) -> Box, Error {
     guard cfg.mail_slots > 0 && cfg.max_waiting > 0 else { return Box { .. }, Error { call: "", code: 0 }; }
     guard cfg.max_conns < 1 << 20 else { return Box { .. }, Error { call: "max_conns", code: EINVAL }; }
-    // A key for each connection's slot, and the worker's own past them.
-    let b, err = mail_open(cfg.mail_slots, cfg.mail_size, waker, cfg.max_conns as i32 + 1, 44);
+    // A key for each connection's slot, the worker's own past them, and each
+    // h2 stream's past that.
+    let keys = cfg.max_conns + 1 + h2_live_keys(cfg);
+    let b, err = mail_open(cfg.mail_slots, cfg.mail_size, waker, keys as i32, 44);
     if err.code == 0 {
         mail_mark(b, worker_key(cfg), true);
         wake_box = b.handle;

@@ -171,8 +171,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var overdue: u64[>..] = [];
     // Connections owed another turn, by slot, for reads or a drain credit.
     var turns: u64[>..] = [];
-    // The generation of each connection and h2 stream: one counter, so no
-    // stream's key repeats an earlier connection's in its slot (later_base).
+    // The generation of each connection and h2 stream (later_base).
     var generation: u64 = 0;
     let nothing = Request { .. };
     let none = Event { kind: NO_EVENT, req: nothing, data: "", whole: false, trailers: "" };
@@ -651,11 +650,11 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             call_worker(fresh, tag, bytes, H);
             return;
         }
-        let i = later_slot(key);
-        guard i < conns.len else { return; }
-        if conns[i].h2 >= 0 {
-            let k = h2_key_index(key);
-            guard conns[i].fd >= 0 && conns[i].state == OPEN && k < h2streams.len && h2_waits_for(h2streams[k], i, key) else { return; }
+        let k = h2_key_index(cfg.max_conns, key);
+        if k >= 0 {
+            guard k < h2streams.len && h2_waits_for(h2streams[k], key) else { return; }
+            let i = h2streams[k].slot;
+            guard conns[i].fd >= 0 && conns[i].state == OPEN else { return; }
             cancel(timers, h2streams[k].x.timer);
             h2streams[k].x.stream.waiting = false;
             wake_at = k;
@@ -664,7 +663,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             wake_at = -1;
             return;
         }
-        guard waits_for(conns[i], key) else { return; }
+        let i = later_slot(key);
+        guard i < conns.len && waits_for(conns[i], key) else { return; }
         cancel(timers, conns[i].x.timer);
         conns[i].x.stream.waiting = false;
         let ev = Event { kind: WAKE, req: nothing, data: bytes, whole: false, trailers: "", tag: tag };
@@ -674,14 +674,13 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     // The exchange of key, which waited, or wanted to and found no timer,
     // is owed TIMEOUT.
     fn timed_out(key: u64, waited: bool) {
-        let i = later_slot(key);
-        guard i < conns.len else { return; }
-        let c .= conns[i];
-        if c.h2 >= 0 {
-            let k = h2_key_index(key);
-            guard c.fd >= 0 && c.state == OPEN && k < h2streams.len else { return; }
+        let k = h2_key_index(cfg.max_conns, key);
+        if k >= 0 {
+            guard k < h2streams.len else { return; }
             let st .= h2streams[k];
-            guard st.slot == i && st.id > 0 && st.x.stream.later.key == key && st.x.stream.waiting == waited else { return; }
+            guard st.id > 0 && st.x.stream.later.key == key && st.x.stream.waiting == waited else { return; }
+            let i = st.slot;
+            guard conns[i].fd >= 0 && conns[i].state == OPEN else { return; }
             st.x.stream.waiting = false;
             retire(st.x.stream);
             wake_at = k;
@@ -691,7 +690,10 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             wake_at = -1;
             return;
         }
-        guard c.fd >= 0 && c.state == OPEN && c.x.stream.later.key == key && c.x.stream.waiting == waited else { return; }
+        let i = later_slot(key);
+        guard i < conns.len else { return; }
+        let c .= conns[i];
+        guard c.fd >= 0 && c.state == OPEN && c.h2 < 0 && c.x.stream.later.key == key && c.x.stream.waiting == waited else { return; }
         c.x.stream.waiting = false;
         // An upgraded exchange's TIMEOUT is a tick that ends nothing: its key stays live through the
         // handler, as through WAKE, so a publisher's mail_live finds it; answer retires it after.

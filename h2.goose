@@ -137,17 +137,31 @@ fn h2_conn(cfg: const Config&, now: i64) -> H2Conn {
     return H2Conn { ours: h2_settings_of(cfg), recv_window: H2_INITIAL_WINDOW, refilled: now, .. };
 }
 
-// The key of a stream's later: its connection's slot, a generation from the
-// counter connections draw theirs from, and its index in the stream pool
-// (decisions, "An h2 stream is an exchange").
-fn h2_key(slot: i64, gen: u64, index: i64) -> u64 {
-    return later_base(slot, gen) | ((index as u64) & 0xFFFFF);
-}
-fn h2_key_index(key: u64) -> i64 { (key & 0xFFFFF) as i64 }
+// The key of a stream's later: in place of a connection's slot, its index in
+// the stream pool, past every slot and the worker's, so each stream has a
+// live entry in the box of its own, and a generation from the counter
+// connections draw theirs from (decisions, "An h2 stream is an exchange").
+// A connection's key gives index -1 or less.
+fn h2_key(max_conns: i64, gen: u64, index: i64) -> u64 { later_base(max_conns + 1 + index, gen) }
+fn h2_key_index(max_conns: i64, key: u64) -> i64 { later_slot(key) - max_conns - 1 }
 
-// Whether stream st of the connection in slot waits for a message to key.
-fn h2_waits_for(st, slot: i64, key: u64) -> bool {
-    return st.slot == slot && st.id > 0 && st.x.stream.waiting && st.x.stream.later.key == key;
+// Whether a stream at index can have a key: below the 20 bits of a key's
+// slot.
+fn h2_keyed(max_conns: i64, index: i64) -> bool { max_conns + 1 + index < 1 << 20 }
+
+// The live entries a loop's box keeps for streams, past the connections' and
+// the worker's: one for each stream its connections may have open at once,
+// as many as keys reach, and none where no listener may speak h2.
+fn h2_live_keys(cfg: const Config&) -> i64 {
+    var h2 = cfg.h2c || cfg.tls;
+    for l in cfg.listeners { h2 = h2 || l.h2c || l.tls; }
+    guard h2 else { return 0; }
+    return min(cfg.max_conns * clamp(cfg.h2_max_streams, 1, H2_STREAM_CAP), (1 << 20) - 1 - cfg.max_conns);
+}
+
+// Whether stream st waits for a message to key.
+fn h2_waits_for(st, key: u64) -> bool {
+    return st.id > 0 && st.x.stream.waiting && st.x.stream.later.key == key;
 }
 
 // Gives back what the connection holds: its streams, with CLOSED to each
@@ -817,6 +831,12 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
 
         gen = gen % 0xFFFFFF + 1;
         let k2 = streams.alloc_index(H2Stream<S> { x: Exchange<S> { state: fresh, .. }, .. });
+        if !h2_keyed(cfg.max_conns, k2) {
+            streams.free(k2);
+            h2_write_rst_stream(wbuf, id, H2_REFUSED_STREAM);
+            remember_reset(id);
+            return;
+        }
         h.streams.push(k2 as i32);
         let st .= streams[k2];
         st.id = id;
@@ -831,7 +851,7 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
         st.x.began = now;
         st.x.stream.direct = false;
         // Without a box the key still finds the stream for its TIMEOUT.
-        st.x.stream.later = MailAddress { box: c.x.stream.later.box, key: h2_key(slot, gen, k2) };
+        st.x.stream.later = MailAddress { box: c.x.stream.later.box, key: h2_key(cfg.max_conns, gen, k2) };
         if end_stream {
             st.remote_closed = true;
             st.called = true;
