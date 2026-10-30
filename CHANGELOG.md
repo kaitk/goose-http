@@ -2,6 +2,18 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.15 (2026-10-30)
+
+A fix for programs run through the JIT. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
+`v0.0.6`, and goose-compress `v0.1.4`. No breaking changes.
+
+Fixed:
+
+- A program run through Goose's JIT, as `goose file.goose` runs one, failed to load
+  `v0.5.14`'s library once it called into the package: two HTTP/3 tests declared an
+  extern of goose-tls's with no sidecar of their own, so the package's library needed
+  it. Each has a sidecar now, and `scripts/test.sh` runs a test through the JIT.
+
 ## v0.5.14 (2026-10-30)
 
 One message to many connections, worker addresses, and security fixes. Goose
