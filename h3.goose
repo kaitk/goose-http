@@ -704,7 +704,41 @@ fn h3_cid_of(b: const u8[:]) -> u64 {
     return v;
 }
 
-fn h3_odcid_key(b: const u8[:]) -> u64 { hash(b) }
+// h3by_odcid's key for a client's first DCID: SipHash-1-3 of it under the
+// worker's secret, h3odcid_k, so that a client can't choose DCIDs whose keys
+// share a probe run, as it could with std's hash, which has no secret.
+var h3odcid_k: u64[2] = [0, 0];
+
+fn sip_rotl(x: u64, n: u64) -> u64 { (x << n) | (x >> (64 - n)) }
+
+fn sip_round(v: u64[4]&) {
+    v[0] = v[0] + v[1]; v[1] = sip_rotl(v[1], 13) ^ v[0]; v[0] = sip_rotl(v[0], 32);
+    v[2] = v[2] + v[3]; v[3] = sip_rotl(v[3], 16) ^ v[2];
+    v[0] = v[0] + v[3]; v[3] = sip_rotl(v[3], 21) ^ v[0];
+    v[2] = v[2] + v[1]; v[1] = sip_rotl(v[1], 17) ^ v[2]; v[2] = sip_rotl(v[2], 32);
+}
+
+fn h3_odcid_key(b: const u8[:]) -> u64 {
+    let k0 = h3odcid_k[0];
+    let k1 = h3odcid_k[1];
+    var v: u64[4] = [k0 ^ 0x736f6d6570736575, k1 ^ 0x646f72616e646f6d, k0 ^ 0x6c7967656e657261, k1 ^ 0x7465646279746573];
+    var i = 0;
+    loop {
+        // Each 8 bytes little-endian, the last with the length in its top byte.
+        let n = min(b.len - i, 8);
+        var m: u64 = 0;
+        for j in n { m = m | (b[i + j] as u64) << (8 * j); }
+        if n < 8 { m = m | (b.len as! u64) << 56; }
+        v[3] = v[3] ^ m;
+        sip_round(v);
+        v[0] = v[0] ^ m;
+        if n < 8 { break; }
+        i += 8;
+    }
+    v[2] = v[2] ^ 0xff;
+    for r in 3 { sip_round(v); }
+    return v[0] ^ v[1] ^ v[2] ^ v[3];
+}
 
 // The transport parameters this side sends for a connection.
 fn h3_params(odcid: const u8[:], cid: const u8[:], out: u8[>..]&) {
@@ -2994,6 +3028,7 @@ fn h3_listen<C, S>(p: H3Pair<C, S>&, cfg: const Config&, k: i64, port: i32) -> E
     if h3rx.len == 0 {
         push_n(h3rx, 0, H3_BATCH * H3_SLOT);
         h3rng = rng { random_seed() };
+        h3odcid_k = [random_seed(), random_seed()];
         h3max_conns = cfg.max_conns;
         h3stopping = false;
     }
