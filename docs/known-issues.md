@@ -230,6 +230,16 @@ its references (2026-10-30).
 - The VM's wall clock can step forward mid-run. `http_client.py` times with
   `time.time()`, and a step during `later` failed a 0.2 s reply as taking 1160 s
   (2026-10-19). Rerun the suite when a time check fails by minutes.
+- Counting a request's instructions under valgrind 3.22 in an arm64 container
+  ([development](development.md#docker-on-macos)) has limits by loop (2026-10-30).
+  On epoll, valgrind runs out of address space after about 4,500 requests, so the two
+  totals stay below that. The io_uring server doesn't exit on SIGINT or SIGTERM
+  under valgrind, so cachegrind, which writes its counts at exit, gives none there;
+  callgrind does, with `callgrind_control -d`, but only for some builds: d36d06c2's
+  and d81c640c's servers ran out of address space at their first request, with
+  137 GB mapped, while 474187c8's served 1,300 requests. Both servers run under
+  `--tool=none` and natively, so the limit is callgrind's, and an io_uring
+  comparison needs both builds to pass under it.
 
 ## Windows
 
