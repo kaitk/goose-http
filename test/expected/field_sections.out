@@ -1,0 +1,13 @@
+small trailers: REQUEST GET /a, trailers 12 bytes, status 204
+trailers past max_head: reset 0x10e
+a head past max_head: status 431
+:path with an escape character: reset 0x10e
+:path with a space: reset 0x10e
+:path with a byte past ASCII: reset 0x10e
+:path with no '/' first: reset 0x10e
+:path with a broken escape: reset 0x10e
+:path with * for GET: reset 0x10e
+:method with an escape character: reset 0x10e
+:method with a space: reset 0x10e
+:method with nothing: reset 0x10e
+OPTIONS *: REQUEST OPTIONS *, trailers 0 bytes, status 204

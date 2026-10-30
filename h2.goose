@@ -233,6 +233,17 @@ fn h2_value_ok(value: const u8[:]) -> bool {
     return a != ' ' && a != '\t' && z != ' ' && z != '\t';
 }
 
+// Whether a request's :method and :path, as HTTP/1.1's request line has
+// them (parse): a token, and visible ASCII with whole escapes, from '/' or
+// "*" for OPTIONS (§8.3.1); a CONNECT has no :path.
+fn h2_request_ok(method: const u8[:], path: const u8[:], connect: bool) -> bool {
+    guard method.len > 0 else { return false; }
+    for c in method { guard is_tchar(c) else { return false; } }
+    guard !connect else { return true; }
+    for c in path { guard c > ' ' && c < 0x7f else { return false; } }
+    return escapes_ok(path) && (path[0] == '/' || path == "*" && method == "OPTIONS");
+}
+
 // How many of a response head's line ends h2_head_block keeps from its
 // search for the blank line; it searches again for any past them.
 let H2_HEAD_LINES = 16;

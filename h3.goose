@@ -2518,9 +2518,11 @@ fn h3_field_section<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, fb: const u8[:], e
     var length = -1;
     var expect = false;
     var unmet = false;
+    // One byte of the section can stand for a static entry's 70, so nothing
+    // is kept past max_head.
     let ok = qpack_decode(fb, huff) { name, value =>
         size += name.len + value.len + 32;
-        if !bad {
+        if !bad && size <= cfg.max_head {
             if name.len > 0 && name[0] == ':' {
                 if regular || trailers { bad = true; }
                 else if name == ":method" && m0 < 0 {
@@ -2568,7 +2570,7 @@ fn h3_field_section<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, fb: const u8[:], e
         fields.append("\r\n");
     }
     if trailers {
-        guard !bad && ended else {
+        guard !bad && ended && size <= cfg.max_head else {
             h3_reset(q, k, H3_MESSAGE_ERROR, H);
             return;
         }
@@ -2581,8 +2583,11 @@ fn h3_field_section<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, fb: const u8[:], e
     let connect = m0 >= 0 && pseudo[m0..m1] == "CONNECT";
     if m0 < 0 || (connect && (a0 < 0 || scheme || p0 >= 0)) || (!connect && (!scheme || p0 < 0 || p1 == p0)) {
         bad = true;
+    } else if !h2_request_ok(pseudo[m0..m1], if connect { pseudo[..0] } else { pseudo[p0..p1] }, connect) {
+        bad = true;
     }
-    if bad {
+    // A head past max_head was kept only in part, and gets 431 below.
+    if bad && size <= cfg.max_head {
         h3_reset(q, k, H3_MESSAGE_ERROR, H);
         return;
     }
