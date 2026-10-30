@@ -373,13 +373,14 @@ fn is_safe_path(path: const u8[:]) -> bool {
 // path still percent-encoded, such as a router's *name parameter: dir, a '/'
 // unless dir is empty or ends in one, and encoded decoded. False, with out
 // as it was, for a bad escape or a decoded path is_safe_path refuses. An
-// empty dir is the working directory.
+// empty dir is the working directory, where a decoded path from '/' is
+// refused: it would name a file anywhere.
 fn file_path(dir: const u8[:], encoded: const u8[:], out: u8[>..]&) -> bool {
     let start = out.len;
     out.append(dir);
     if dir.len > 0 && dir[dir.len - 1] != '/' { out.push('/'); }
     let at = out.len;
-    guard decode(encoded, out) && is_safe_path(out[at..]) else {
+    guard decode(encoded, out) && (at > start || out.len == at || out[at] != '/') && is_safe_path(out[at..]) else {
         out.resize(start);
         return false;
     }

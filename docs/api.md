@@ -441,7 +441,8 @@ so does `/static/NAME`, as HttpArena's static profiles ask.
 - `http::file_path(dir, name, path)`: appends to `path` the file in `dir` that `name`
   names, such as a route's `*name` parameter, decoded. False for a bad escape or a
   path that would leave `dir`, which `http::is_safe_path` checks: it rejects `.` and
-  `..` segments, NUL, backslashes, and colons, escaped or not.
+  `..` segments, NUL, backslashes, and colons, escaped or not. An empty `dir` is the
+  working directory, and there a path from `/`, escaped or not, is rejected too.
 
 ## Answers that wait
 

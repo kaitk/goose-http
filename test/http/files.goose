@@ -20,7 +20,12 @@ fn main() {
     for e in outside {
         assert(!http::file_path("www", e, path) && path == "x");
     }
-    print("paths: ", outside.len, " outside the directory refused");
+    // In the working directory, a path from '/' would be absolute.
+    let rooted = ["/etc/x", "%2Fetc%2Fx", "//host/x"];
+    for e in rooted {
+        assert(!http::file_path("", e, path) && path == "x");
+    }
+    print("paths: ", outside.len + rooted.len, " outside the directory refused");
     assert(http::content_type_of("a/b.HTML") == "text/html; charset=utf-8");
     assert(http::content_type_of("x.tar.gz") == "application/gzip");
     assert(http::content_type_of("app.js.map") == "application/json");
