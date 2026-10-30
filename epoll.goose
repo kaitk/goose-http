@@ -171,8 +171,6 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var overdue: u64[>..] = [];
     // Connections owed another turn, by slot, for reads or a drain credit.
     var turns: u64[>..] = [];
-    // The generation of each connection and h2 stream (later_base).
-    var generation: u64 = 0;
     let nothing = Request { .. };
     let none = Event { kind: NO_EVENT, req: nothing, data: "", whole: false, trailers: "" };
 
@@ -260,8 +258,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 conns.free(i);
                 continue;
             }
-            generation = generation % 0xFFFFFF + 1;
-            conns[i].x.stream.later = MailAddress { box: box.handle, key: later_base(i, generation) };
+            conns[i].x.stream.later = MailAddress { box: box.handle, key: later_base(i) | later_draw() };
             if h2c_at[k] { conns[i].h2 = h2conns.alloc_index(h2_conn(cfg, now)) as i32; }
             if tls_at[k] {
                 let t = tls_open(tls);
@@ -338,7 +335,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 let before = wbuf.len;
                 let rest, full = h2_answer(c, driving, h2conns[c.h2], h2streams, spill, rbuf, rlen, wbuf, cfg.write_buffer,
                                            h2out, h2fields, h2pseudo, h2cookie, h2huff, h2fb, common, cfg, fresh, stopping, now, ev,
-                                           wake_at, timers, overdue, generation, H);
+                                           wake_at, timers, overdue, H);
                 let moved = rest != rlen || wbuf.len > before;
                 rlen = rest;
                 EpollTurn { moved: moved, full: full }

@@ -42,8 +42,8 @@ let WRITABLE: u32 = EPOLLOUT;
 let SOCKET_READY: i32 = -2147483647 - 1;
 
 // The keys wait_socket gives the loop as event tags are at least this, and
-// below the listeners' and the waker's tags (epoll.goose): a key's
-// generation is never 0, and a connection's own tag, its slot, is below
+// below the listeners' and the waker's tags (epoll.goose), as later_n
+// leaves them, and a connection's own tag, its slot, is below
 // Config.max_conns, at most 1 << 20 where exchanges can wait.
 let SOCKET_KEYS: u64 = 1 << 20;
 

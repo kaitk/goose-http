@@ -463,14 +463,42 @@ exchange gets. A stream's body comes as HTTP/1.1's does: whole at REQUEST when i
 fits in the read buffer, else in pieces, so the route chooses between gathering it and
 reading it in pieces as before. A stream's `later` key puts its index in the stream
 pool where an HTTP/1.1 key has its connection's slot, past every slot and the
-worker's, and takes its 24 bits of generation from the counter connections draw
-theirs from, so a reply finds its stream and no other. The slot bits pick a key's
+worker's, and below it a number of its own
+([below](#a-later-keys-number-doesnt-repeat-in-its-slot)), so a reply finds its
+stream and no other. The slot bits pick a key's
 live entry in the loop's box, so each waiting stream has an entry of its own: with
 the connection's slot, the streams of one connection shared an entry, and each
 stream's `later` made the one before it unreachable (2026-10-30). The box keeps an
 entry for each stream the connections may have open at once, up to the 20 bits'
 reach, only where a listener may speak h2; a stream past that reach is refused with
 `REFUSED_STREAM`. A stream that waits holds back no other stream.
+
+## A later key's number doesn't repeat in its slot
+
+Decided 2026-10-30, task 068.12.
+
+Below its 20 bits of slot, a `later` key has a 44-bit number, from a counter of the
+worker's (`later_draw`). A connection draws one as it opens, each HTTP/1.1 request
+adds one to its key, and its close moves the counter past its last key; an h2 stream
+draws one as it opens. So no number repeats in a slot until the worker has counted
+2^44 requests and streams, years at a million a second, and a reply held past its
+exchange's end returns `STALE` until then. The key is the exchange's while it lasts,
+which makes it the worker's handle for an exchange: an HTTP/3 exchange, which can't
+wait yet and has no box entry, draws a number too, in the worker's own slot.
+
+The key had 24 bits of the connection's generation and 20 of the exchange's number
+on its connection. The generation repeated after 2^24 accepts on one worker, about
+an hour at the 4,300 a second the audit measured, and with h2 streams drawing from
+the same counter, after 2^24 streams, minutes on a busy worker; the number repeated
+after 2^20 requests on one connection. A sender holding an address that long, as a
+subscriber list or a long poll does, reached whichever exchange then waited with the
+same key. Counting a connection's requests in its key costs a request an increment,
+where it had a mask and an or.
+
+Rejected: drawing from the counter at each request, a load and a store more for
+every request; drawing at the exchange's first `later`, which costs the request path
+nothing but changes the key in the middle of the exchange, so it can't name one; and
+a counter per slot, a field in every connection.
 
 ## TLS is goose-tls, reached from the module http.tls
 
@@ -807,8 +835,8 @@ A wait can also end in the code that every loop shares: an answer in the call th
 waited, over HTTP/1.1 or h2, or an h2 stream's reset or 413 (2026-10-22). That code
 calls `net_disarm(key)`, which only a thread that `ring_bind` bound points at its
 ring's cancel; elsewhere it does nothing. An exchange's key has its own number, and a
-stream's its own generation, so on epoll and kqueue the event after the wait ends
-matches no later wait. The shim's thread-local, which `net_arm` already uses, spares
+stream's too, so on epoll and kqueue the event after the wait ends matches no later
+wait. The shim's thread-local, which `net_arm` already uses, spares
 that code a parameter for one loop's need. Only an exchange that waits makes the call.
 
 The key takes all 64 bits, more than a ring tag's 62, so the shim keeps it in a record

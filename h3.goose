@@ -631,7 +631,7 @@ var h3memo_block: u8[H3_MEMO] = [0; H3_MEMO];
 var h3memo_block_len: i64 = 0;
 
 // The keys its UDP sockets are armed with, below the listeners' tags on
-// either loop; a later's key can't be one but at Config.max_conns' limit.
+// either loop, and above any later's key (later_n).
 let H3_KEY_BASE: u64 = 0xFFFFFFFFFFFFFFF0;
 fn h3_key(k: i64) -> u64 { H3_KEY_BASE - (k as u64) }
 
@@ -2610,6 +2610,10 @@ fn h3_field_section<S, H>(q: H3ServerOf<S>&, ci: i64, k: i64, fb: const u8[:], e
     e.x.since = now;
     e.x.began = now;
     e.x.stream.direct = false;
+    // No box takes it, since an exchange can't wait yet, but the key is the
+    // exchange's own, as other exchanges' are: in the worker's slot, which
+    // no connection or stream has, with a number drawn as a stream's is.
+    e.x.stream.later.key = later_base(cfg.max_conns) | later_draw();
     e.length = length;
     if size > cfg.max_head { h3_refuse(q, k, 431, common, H); return; }
     if p1 - p0 > cfg.max_line { h3_refuse(q, k, 414, common, H); return; }

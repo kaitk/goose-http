@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A lane's reply to an HTTP/1.1 exchange whose client has gone is STALE, and reaches no h2c
-stream of a later connection in the same slot, whatever generations and pool indexes the streams
-get. With a generation counter of their own, stream 5's key was the gone exchange's. And a reply
+stream of a later connection in the same slot, whatever keys and pool indexes the streams get.
+With a generation counter of their own, stream 5's key was the gone exchange's. And a reply
 reaches an h2c stream that waits while a later stream of its connection waits too, and is STALE
 once the stream has ended. LOOP=uring needs io_uring, and is skipped where the fixture finds
 none."""
@@ -55,15 +55,15 @@ def data_frames(data):
 
 def attack(port):
     # The readiness probe was the worker's first connection, in slot 0. The victim takes the
-    # slot next, with generation 2, and leaves before the lane replies to its first exchange.
+    # slot next, and leaves before the lane replies to its first exchange.
     v = socket.create_connection(("127.0.0.1", port))
     v.sendall(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
     time.sleep(.05)
     v.close()
     time.sleep(.05)
-    # Another client's h2c streams in the slot, waiting when the lane replies. With their own
-    # counter, stream 3 had generation 2 and pool index 1: the victim's key. It waits last, so
-    # the slot's live entry is its key when the lane sends.
+    # Another client's h2c streams, waiting when the lane replies. When streams had generations
+    # of their own and the connection's slot, stream 3 had generation 2 and pool index 1: the
+    # victim's key.
     a = socket.create_connection(("127.0.0.1", port + 1))
     a.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(4, 0, 0, b""))
     for sid in (1, 3):

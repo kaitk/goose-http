@@ -139,10 +139,9 @@ fn h2_conn(cfg: const Config&, now: i64) -> H2Conn {
 
 // The key of a stream's later: in place of a connection's slot, its index in
 // the stream pool, past every slot and the worker's, so each stream has a
-// live entry in the box of its own, and a generation from the counter
-// connections draw theirs from (decisions, "An h2 stream is an exchange").
-// A connection's key gives index -1 or less.
-fn h2_key(max_conns: i64, gen: u64, index: i64) -> u64 { later_base(max_conns + 1 + index, gen) }
+// live entry in the box of its own, and a number of its own (decisions, "An
+// h2 stream is an exchange"). A connection's key gives index -1 or less.
+fn h2_key(max_conns: i64, index: i64) -> u64 { later_base(max_conns + 1 + index) | later_draw() }
 fn h2_key_index(max_conns: i64, key: u64) -> i64 { later_slot(key) - max_conns - 1 }
 
 // Whether a stream at index can have a key: below the 20 bits of a key's
@@ -321,17 +320,16 @@ fn h2_head_block(enc: HpackTable&, fb: u8[>..]&, text: u8[:]) -> i64 {
 // its kind is NO_EVENT, is a WAKE or TIMEOUT for stream wake_at, which
 // stopped waiting. A connection error writes GOAWAY and leaves c CLOSING.
 // Returns the bytes left in rbuf, and whether wbuf filled with output still
-// to write. gen numbers the streams' keys for later. The worker's scratch,
-// which this reuses: bout, the handler's response; bfields and bpseudo, the
-// request's field lines and its pseudo-fields' values; bcookie, its cookies
-// joined; bhuff, HPACK's Huffman-decoded strings; and bfb, a field block to
-// send.
+// to write. The worker's scratch, which this reuses: bout, the handler's
+// response; bfields and bpseudo, the request's field lines and its
+// pseudo-fields' values; bcookie, its cookies joined; bhuff, HPACK's
+// Huffman-decoded strings; and bfb, a field block to send.
 fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, spill: u8[>..]&,
                       rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, limit: i64, bout: u8[>..]&, bfields: u8[>..]&,
                       bpseudo: u8[>..]&, bcookie: u8[>..]&, bhuff: u8[>..]&, bfb: u8[>..]&,
                       common: const u8[:],
                       cfg: const Config&, fresh: const S&, stopping: bool, now: i64, wake: const Event&,
-                      wake_at: i64, timers: Timers&, overdue: u64[>..]&, gen: u64&) -> i64, bool {
+                      wake_at: i64, timers: Timers&, overdue: u64[>..]&) -> i64, bool {
     var off = 0;
     var dead = false;
     var closed_now = 0;
@@ -829,7 +827,6 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
         let method = bpseudo[m0..m1];
         let target = if connect { bpseudo[a0..a1] } else { bpseudo[p0..p1] };
 
-        gen = gen % 0xFFFFFF + 1;
         let k2 = streams.alloc_index(H2Stream<S> { x: Exchange<S> { state: fresh, .. }, .. });
         if !h2_keyed(cfg.max_conns, k2) {
             streams.free(k2);
@@ -851,7 +848,7 @@ fn h2_answer<S, H, C>(c: C&, slot: i64, h: H2Conn&, streams: H2Stream<S>[>..]&, 
         st.x.began = now;
         st.x.stream.direct = false;
         // Without a box the key still finds the stream for its TIMEOUT.
-        st.x.stream.later = MailAddress { box: c.x.stream.later.box, key: h2_key(cfg.max_conns, gen, k2) };
+        st.x.stream.later = MailAddress { box: c.x.stream.later.box, key: h2_key(cfg.max_conns, k2) };
         if end_stream {
             st.remote_closed = true;
             st.called = true;

@@ -26,8 +26,6 @@ let RING_WAKE: u64 = 0xFFFFFFFE;
 // ring (ring_bind): RING_WAKE - MAX_LISTENERS - 1, below the listeners', so
 // it's no connection's.
 let RING_SOCKET: u64 = 0xFFFFFFFA;
-// The bits of a later's key that hold its connection's slot (later_base).
-let SLOT_BITS: u64 = 0xFFFFF00000000000;
 
 fn ring_listener_tag(k: i64) -> u64 {
     return if k == 0 { RING_LISTENER } else { RING_WAKE - (k as u64) };
@@ -171,7 +169,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     reusable[] var spill: u8[>..] = [];
     reusable var conns: RingConn<S>[>..] = [];
     var open = 0;
-    // The generation of each connection and h2 stream (later_base).
+    // The generation of each connection, in its tag.
     var generation: u64 = 0;
     var closed = false;
     // h2c's connections and streams, empty unless a listener serves h2c;
@@ -227,14 +225,13 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             net_close(fd);
             return;
         }
-        // A tag fits in 56 bits, and a free slot's is 0. 24 bits, as a
-        // key's: a wider counter would reach keys whose generation bits are 0.
+        // A tag fits in 56 bits, and a free slot's is 0.
         generation = generation % 0xFFFFFF + 1;
         let i = conns.alloc_index(RingConn<S> { fd: fd, reading: true, deadline: now + cfg.request_ms, .. });
         let c .= conns[i];
         c.tag = (generation << 32) | (i as u64);
         c.x.stream.direct = true;
-        c.x.stream.later = MailAddress { box: box.handle, key: later_base(i, generation) };
+        c.x.stream.later = MailAddress { box: box.handle, key: later_base(i) | later_draw() };
         if tls_at[k] {
             let t = tls_open(tls);
             // OpenSSL is out of memory: the client is turned away.
@@ -427,8 +424,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             }
             let rest, full = h2_answer(c, slot, h2conns[c.h2], h2streams, spill, rbuf, rlen, wbuf,
                                        max(cfg.max_queued - c.queued, 0), h2out, h2fields, h2pseudo, h2cookie,
-                                       h2huff, h2fb, common, cfg, fresh, stopping, now, ev, wake_at, timers, overdue,
-                                       generation, H);
+                                       h2huff, h2fb, common, cfg, fresh, stopping, now, ev, wake_at, timers, overdue, H);
             ev.kind = NO_EVENT;
             if rest != rlen || wbuf.len > 0 { progress = true; }
             rlen = rest;

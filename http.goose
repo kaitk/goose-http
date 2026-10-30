@@ -339,14 +339,30 @@ fn retire(s: Stream&) {
     mail_mark(Box { handle: s.later.box }, s.later.key, false);
 }
 
-// A Later's key: the connection's slot, 24 bits of its generation, and 20 of
-// the exchange's number, so a message for a closed connection, or an
-// exchange that has ended, matches no exchange that waits. The slot picks
-// the key's live entry in the loop's box; an h2 stream has an entry of its
-// own past the slots (h2_key). Connections and h2 streams draw their
-// generations from one counter per loop.
-fn later_base(slot: i64, gen: u64) -> u64 { ((slot as u64) << 44) | ((gen & 0xFFFFFF) << 20) }
+// A Later's key: the slot of its live entry in the loop's box, a
+// connection's or, past them, an h2 stream's (h2_key), and below it a
+// number no earlier exchange in the slot had, so a message for a closed
+// connection, or an exchange that has ended, matches no exchange that
+// waits. A connection draws its number from the worker's counter
+// (later_draw), and each HTTP/1.1 request on it adds one, which its close
+// moves the counter past (abandon); an h2 stream draws one of its own. The
+// key stays the exchange's while it lasts, so a worker's exchanges at once
+// have keys apart.
+fn later_base(slot: i64) -> u64 { (slot as u64) << 44 }
 fn later_slot(key: u64) -> i64 { (key >> 44) as i64 }
+let SLOT_BITS: u64 = 0xFFFFF00000000000;
+
+// The worker's last drawn number. Numbers run from SOCKET_KEYS, so that
+// wait_socket takes slot 0's keys, to LATER_LAST, which leaves an HTTP/1.1
+// connection 2^32 requests below the slot's bits and every key below the
+// loops' own tags, and then again: they repeat after 2^44 requests and
+// streams, years at a million a second.
+var later_n: u64 = SOCKET_KEYS;
+let LATER_LAST: u64 = (1 << 44) - (1 << 32);
+fn later_draw() -> u64 {
+    later_n = if later_n < LATER_LAST { later_n + 1 } else { SOCKET_KEYS };
+    return later_n;
+}
 
 // Whether connection c's exchange waits for a message to key.
 fn waits_for(c, key: u64) -> bool {
@@ -511,12 +527,14 @@ fn call_worker<S, H>(fresh: const S&, tag: i32, bytes: const u8[:]) {
       Reply { buf: sink, common: "", keep_alive: keep, minor: 1, head: false, stream: stream });
 }
 
-// Calls H with CLOSED for c's exchange, if it was owed another call.
+// Calls H with CLOSED for c's exchange, if it was owed another call. Its
+// connection's next in the slot draws a number past its last key's.
 fn abandon<H, C>(c: C&) {
     let x .= c.x;
     let owed = x.stream.open || x.stream.waiting || (!x.skip && x.body != BodyReader.None);
     x.stream.waiting = false;
     retire(x.stream);
+    later_n = max(later_n, x.stream.later.key & ~SLOT_BITS);
     guard owed else { return; }
     var sink: u8[>..] = [];
     let none = Request { .. };
@@ -787,9 +805,9 @@ fn answer<S, H, ROOM, C>(c: C&, rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, common: 
         x.served++;
         x.keep_alive = req.keep_alive && !stopping && (max_requests <= 0 || x.served < max_requests);
         x.state = fresh;
-        // The exchange's address for later. Without a box the key still
-        // finds the exchange for its TIMEOUT.
-        x.stream.later.key = (x.stream.later.key & ~0xFFFFF) | ((x.served & 0xFFFFF) as u64);
+        // The exchange's address for later (later_base). Without a box the
+        // key still finds the exchange for its TIMEOUT.
+        x.stream.later.key++;
         let before = wbuf.len;
         H(Event { kind: REQUEST, req: req, data: data, whole: whole, trailers: trailers }, &x.state,
           Reply { buf: wbuf, common: common, keep_alive: x.keep_alive, minor: req.minor,

@@ -13,7 +13,7 @@ fn test_wait_liveness() {
     let box, err = http::mail_open(2, 8, 0, 1, 44);
     assert(err.code == 0);
     var c = WaitingConn { fd: 1, state: http::OPEN, .. };
-    c.x.stream.later = http::address(box, http::later_base(0, 1) | 1);
+    c.x.stream.later = http::address(box, http::later_base(0) | http::later_draw());
     var out: u8[>..] = [];
     var keep = true;
     let reply = http::Reply { buf: out, common: check::COMMON, keep_alive: keep, minor: 1, head: false, stream: c.x.stream };

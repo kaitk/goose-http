@@ -484,6 +484,9 @@ else { http::respond(out, 503, "text/plain", "busy"); return; }
 - A send to an exchange that no longer waits returns `STALE`. A message already
   queued or in flight when the wait ends can still be dropped by the loop. At stop,
   a waiting exchange gets `Config.grace_ms`, then `CLOSED`.
+- The exchange's address is `out.stream.later` from its first call to its last, over
+  HTTP/1.1, h2, and HTTP/3, and no other exchange of the worker has its key in that
+  time, so a worker's own table of exchanges can be keyed by it.
 - `http::mail_live(address)` tells any thread whether the box accepts that key now,
   so a lane can skip work for a client that is no longer waiting. It is a snapshot:
   a later send can still return `STALE`. The key stays live through `WAKE` while the
