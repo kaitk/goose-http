@@ -22,11 +22,19 @@ be harmless:
   found by scanning.
 - `h3.goose`: ACK ranges past 64 are ignored, which only resends acknowledged packets.
 
-The other buffers that hold peer input still need a check: `H3Spans`, the connection
-IDs and `streams`, `ready`, and `sending` in `h3.goose`, `held` in `hpack.goose`,
-`params` in `h2frame.goose`, `streams` in `h2.goose`, `digits` in `qpack.goose` and
-`h2.goose`, `version` in `http.goose`, and `via`, `peer`, and `fields` in
-`client.goose`.
+The 2026-10-24 security review's fixes settled two more (2026-10-30). `H3Spans` merged
+its two closest ranges when full, which for the bytes a stream received delivered a
+gap's zeros, and for those acknowledged skipped bytes that weren't. A range received
+apart from 8 others now closes the connection, and one acknowledged apart from 8
+others is sent again; only lost ranges still merge, which only resends bytes
+(`test/h3/spans.goose`). `ready` kept a closed stream beside its slot's next stream
+until it overflowed and aborted; it now holds each open stream once
+(`test/h3/ready_list.goose`).
+
+The other buffers that hold peer input still need a check: the connection IDs and
+`streams` and `sending` in `h3.goose`, `held` in `hpack.goose`, `params` in
+`h2frame.goose`, `streams` in `h2.goose`, `digits` in `qpack.goose` and `h2.goose`,
+`version` in `http.goose`, and `via`, `peer`, and `fields` in `client.goose`.
 
 ## Acceptance criteria
 

@@ -131,13 +131,19 @@ let H3_SETTING_QPACK_BLOCKED = 0x07;
 
 // [lo, hi) of a stream's or a level's bytes.
 struct H3Span { lo: i64, hi: i64 }
-// Ranges, apart and in order. Full, the two closest merge, which for the
-// ranges acknowledged only means sending some bytes again.
+// Ranges, apart and in order.
 let H3_SPANS = 8;
 struct H3Spans { s: H3Span[..H3_SPANS] = [] }
 
-fn spans_add(sp: H3Spans&, lo: i64, hi: i64) {
-    guard lo < hi else { return; }
+// Adds [lo, hi) to sp: false, with nothing added, where it's apart from the
+// others and they're H3_SPANS already.
+fn spans_add(sp: H3Spans&, lo: i64, hi: i64) -> bool {
+    guard lo < hi else { return true; }
+    if sp.s.len == H3_SPANS {
+        var touches = false;
+        for g in sp.s { if !(g.hi < lo || g.lo > hi) { touches = true; } }
+        guard touches else { return false; }
+    }
     var a = lo;
     var b = hi;
     var i = 0;
@@ -153,20 +159,24 @@ fn spans_add(sp: H3Spans&, lo: i64, hi: i64) {
     }
     var at = 0;
     while at < sp.s.len && sp.s[at].lo < a { at++; }
-    if sp.s.len == H3_SPANS {
-        // Merge the two closest neighbours to make room.
-        var best = 0;
-        for j in 1..sp.s.len - 1 {
-            if sp.s[j + 1].lo - sp.s[j].hi < sp.s[best + 1].lo - sp.s[best].hi { best = j; }
-        }
-        sp.s[best].hi = sp.s[best + 1].hi;
-        sp.s.remove_at(best + 1);
-        if at > best + 1 { at--; }
-    }
     sp.s.insert_at(at, H3Span { lo: a, hi: b });
+    return true;
 }
 
-// Takes [lo, hi) out of sp.
+// Adds [lo, hi) to sp, a set of bytes lost, making room where it's full by
+// merging the two closest spans: that only sends some bytes again.
+fn spans_cover(sp: H3Spans&, lo: i64, hi: i64) {
+    if spans_add(sp, lo, hi) { return; }
+    var best = 0;
+    for j in 1..sp.s.len - 1 {
+        if sp.s[j + 1].lo - sp.s[j].hi < sp.s[best + 1].lo - sp.s[best].hi { best = j; }
+    }
+    sp.s[best].hi = sp.s[best + 1].hi;
+    sp.s.remove_at(best + 1);
+    spans_add(sp, lo, hi);
+}
+
+// Takes [lo, hi) out of sp, a set of bytes lost.
 fn spans_remove(sp: H3Spans&, lo: i64, hi: i64) {
     var i = 0;
     while i < sp.s.len {
@@ -176,8 +186,8 @@ fn spans_remove(sp: H3Spans&, lo: i64, hi: i64) {
             continue;
         }
         sp.s.remove_at(i);
-        if g.hi > hi { spans_add(sp, hi, g.hi); }
-        if g.lo < lo { spans_add(sp, g.lo, lo); }
+        if g.hi > hi { spans_cover(sp, hi, g.hi); }
+        if g.lo < lo { spans_cover(sp, g.lo, lo); }
         i = 0;
     }
 }
@@ -272,19 +282,27 @@ fn tx_bytes(t: const H3Tx&, lo: i64, hi: i64) -> u8[:] {
     return h3bytes[t.data.at + lo - t.start..t.data.at + hi - t.start];
 }
 
-// Bytes [lo, hi) acknowledged.
-fn tx_ack(t: H3Tx&, lo: i64, hi: i64) {
+// Bytes [lo, hi) acknowledged: false where there's no room to record them
+// apart from the others, so that they're sent again, as if lost. Merging two
+// spans would mark the bytes between them acknowledged.
+fn tx_ack(t: H3Tx&, lo: i64, hi: i64) -> bool {
     spans_remove(t.lost, lo, hi);
+    var kept = true;
     if lo <= t.base && hi > t.base {
         t.base = hi;
-    } else if lo > t.base {
-        spans_add(t.acked, lo, hi);
+    } else if lo > t.base && !spans_add(t.acked, lo, hi) {
+        tx_lost(t, lo, hi);
+        kept = false;
     }
     loop {
         guard t.acked.s.len > 0 && t.acked.s[0].lo <= t.base else { break; }
         t.base = max(t.base, t.acked.s[0].hi);
         t.acked.s.remove_at(0);
     }
+    // A merge of lost spans may reach below base, where tx_room can move
+    // start past it.
+    spans_remove(t.lost, 0, t.base);
+    return kept;
 }
 
 // Bytes [lo, hi), sent, are lost: what of them isn't acknowledged is sent
@@ -292,7 +310,7 @@ fn tx_ack(t: H3Tx&, lo: i64, hi: i64) {
 fn tx_lost(t: H3Tx&, lo: i64, hi: i64) {
     let a = max(lo, t.base);
     guard a < hi else { return; }
-    spans_add(t.lost, a, hi);
+    spans_cover(t.lost, a, hi);
     for g in t.acked.s { spans_remove(t.lost, g.lo, g.hi); }
 }
 
@@ -309,7 +327,9 @@ fn tx_free(t: H3Tx&) {
 }
 
 // Stores bytes at offset off in r; false where they reach past r.max, a
-// FLOW_CONTROL_ERROR. Bytes before read, or there already, are dropped.
+// FLOW_CONTROL_ERROR, or would leave more gaps than r.got holds, where the
+// connection closes too: the packet is acknowledged already, so its bytes
+// can't be dropped. Bytes before read, or there already, are dropped.
 fn rx_put(r: H3Rx&, off: i64, bytes: const u8[:]) -> bool {
     let end = off + bytes.len;
     guard end <= r.max else { return false; }
@@ -327,8 +347,7 @@ fn rx_put(r: H3Rx&, off: i64, bytes: const u8[:]) -> bool {
     }
     let at = r.data.at + lo - r.start;
     net_copy(h3bytes[at..at + end - lo], bytes[lo - off..]);
-    spans_add(r.got, lo, end);
-    return true;
+    return spans_add(r.got, lo, end);
 }
 
 // The bytes in r from read on that arrived without a gap.
@@ -948,7 +967,7 @@ fn refs_acked(ci: i64, s: i64, refs: const H3Ref[:]) {
         } else if r.kind == R_STREAM {
             let st .= h3strms[r.stream];
             if st.conn == ci && st.gen == r.gen {
-                tx_ack(st.tx, r.off, r.off + r.len);
+                if !tx_ack(st.tx, r.off, r.off + r.len) { strm_sends(r.stream); }
                 if r.fin { st.tx.fin_acked = true; }
             }
         }

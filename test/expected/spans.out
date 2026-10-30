@@ -1,0 +1,6 @@
+chunks to 16: delivered as sent true
+chunks to 17: chunk 17 refused, error 3, 0 bytes delivered
+8 acknowledged: acked [50,100) [200,250) [1000,1010) [1500,1510) [2000,2010) [2500,2510) [3000,3010) [3500,3510)
+a 9th, sent again: true, lost [100,200) [3800,3810)
+[0,50) acknowledged: base 100, lost [100,200) [3800,3810)
+the lost bytes sent: 210 of the stream's, 0 of another run's
