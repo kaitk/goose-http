@@ -1,0 +1,4 @@
+first flight: datagrams 1, records 2
+acknowledged: records 1
+2000 PINGs: 1000 ACK-only answers, records 1, open true, largest sent 1001
+the newest acknowledged: largest acked 1001, records 1

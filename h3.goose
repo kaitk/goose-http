@@ -1038,6 +1038,8 @@ fn on_ack(ci: i64, s: i64, ranges: const QRange[:], largest: i64, delay: i64, no
     var acked_any = false;
     while k >= 0 {
         let p = h3sent[k];
+        // The list is in packet number order: what follows wasn't acknowledged.
+        guard p.pn <= largest else { break; }
         var hit = false;
         for g in ranges { if p.pn >= g.lo && p.pn <= g.hi { hit = true; } }
         if !hit {
@@ -1072,8 +1074,9 @@ fn on_ack(ci: i64, s: i64, ranges: const QRange[:], largest: i64, delay: i64, no
         sent_unlink(ci, s, prev, k);
         k = next;
     }
-    guard acked_any else { return true; }
+    // An ACK-only packet has no record, but its number counts here.
     if largest > sp.largest_acked { sp.largest_acked = largest; }
+    guard acked_any else { return true; }
     if newly_largest && largest_eliciting {
         let exp = if s == 2 { c.peer_params.ack_delay_exponent } else { 0 };
         let delay_ms = if s == 2 { ((delay << exp) / 1000) } else { 0 };
@@ -1955,7 +1958,12 @@ fn h3_seal(h3tx: u8[>..]&, ci: i64, built: H3Built[..3]&, refs: const H3Ref[:], 
         tls::quic_seal(c.t, key, h3tx[b.at..b.end + 16], b.pn_at - b.at + b.pn_len, b.pn_len, b.pn);
         let sp .= c.sp[b.space];
         sp.largest_sent = b.pn;
+        if b.space == 2 { c.sealed++; }
         let in_flight = b.eliciting || b.padded;
+        // An ACK-only packet has nothing to send again or count in flight,
+        // and a client needn't acknowledge it (RFC 9000, section 13.2.1), so
+        // a record of it could stay for the connection's life.
+        if !in_flight && b.refs_len == 0 { continue; }
         var at: i64 = 0;
         if b.refs_len > 0 {
             let r = h3refs.alloc_slice(b.refs_len);
@@ -1970,7 +1978,6 @@ fn h3_seal(h3tx: u8[>..]&, ci: i64, built: H3Built[..3]&, refs: const H3Ref[:], 
             sp.eliciting_in_flight++;
         }
         if in_flight { c.in_flight += size; }
-        if b.space == 2 { c.sealed++; }
     }
 }
 
