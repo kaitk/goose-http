@@ -672,6 +672,14 @@ fn strm_close(ci: i64, k: i64) {
         while at < c.sending.len && c.sending[at] != k { at++; }
         if at < c.sending.len { c.sending.remove_at(at); }
     }
+    // A request waiting on a full queue (H3_QUEUED) can close readable: its
+    // slot's next stream mustn't find it listed.
+    if s.readable {
+        s.readable = false;
+        at = 0;
+        while at < c.ready.len && c.ready[at] != k { at++; }
+        if at < c.ready.len { c.ready.remove_at(at); }
+    }
     h3strms.free(k);
 }
 

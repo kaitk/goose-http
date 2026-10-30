@@ -279,7 +279,8 @@ which `http.build` lists under `c_sources_windows`
 ([architecture](architecture.md#c-in-the-package)), and
 `scripts/test-http.sh` and `scripts/test-echo.sh` pass there, in Git Bash. The epoll loop doesn't build on Windows. Windows isn't for benchmarks.
 TLS, which IOCP doesn't serve, isn't set up on Windows: `test/run_tests.py`
-leaves out `test/tls/` there, and `scripts/test-examples.sh` `examples/tls`.
+leaves out `test/tls/` and the tests that import `http.h3` there, and
+`scripts/test-examples.sh` `examples/tls`.
 
 The scripts fetch the `windows-x64` release ([Get Goose](#get-goose)). `goose build`
 needs the Visual Studio 2026 Build Tools: run
