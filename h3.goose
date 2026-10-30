@@ -1374,9 +1374,13 @@ fn h3_stream_in(ci: i64, id: i64, off: i64, data: const u8[:], fin: bool) -> i64
     c3.rx_total += grew;
     guard c3.rx_total <= c3.rx_max else { return QE_FLOW_CONTROL_ERROR; }
     if st.rx_stopped {
+        // What's dropped counts as read, so that a RESET_STREAM, which
+        // credits from read, doesn't credit it again.
         st.rx.high = max(st.rx.high, end);
         guard st.rx.high <= st.rx.max else { return QE_FLOW_CONTROL_ERROR; }
-        c3.rx_read += grew;
+        c3.rx_read += st.rx.high - st.rx.read;
+        st.rx.read = st.rx.high;
+        st.rx.got.s.clear();
         return 0;
     }
     guard rx_put(st.rx, off, data) else { return QE_FLOW_CONTROL_ERROR; }
