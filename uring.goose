@@ -170,11 +170,13 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     reusable[] var spill: u8[>..] = [];
     reusable var conns: RingConn<S>[>..] = [];
     var open = 0;
+    // The generation of each connection and h2 stream: one counter, so no
+    // stream's key repeats an earlier connection's in its slot (later_base).
     var generation: u64 = 0;
     var closed = false;
     // h2c's connections and streams, empty unless a listener serves h2c;
-    // the worker's scratch for them; the streams' generations for later's
-    // keys; and the stream a WAKE or TIMEOUT is for, while resume hands it on.
+    // the worker's scratch for them; and the stream a WAKE or TIMEOUT is
+    // for, while resume hands it on.
     reusable var h2conns: H2Conn[>..] = [];
     reusable var h2streams: H2Stream<S>[>..] = [];
     var h2out: u8[>..] = [];
@@ -183,7 +185,6 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var h2cookie: u8[>..] = [];
     var h2huff: u8[>..] = [];
     var h2fb: u8[>..] = [];
-    var h2gen: u64 = 0;
     var wake_at: i64 = -1;
     var now = net_clock_ms();
     var next_sweep = now + 1000;
@@ -225,8 +226,9 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             net_close(fd);
             return;
         }
-        // A tag fits in 62 bits, and a free slot's is 0.
-        generation = generation % 0x3FFFFFFF + 1;
+        // A tag fits in 56 bits, and a free slot's is 0. 24 bits, as a
+        // key's: a wider counter would reach keys whose generation bits are 0.
+        generation = generation % 0xFFFFFF + 1;
         let i = conns.alloc_index(RingConn<S> { fd: fd, reading: true, deadline: now + cfg.request_ms, .. });
         let c .= conns[i];
         c.tag = (generation << 32) | (i as u64);
@@ -418,7 +420,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             let rest, full = h2_answer(c, slot, h2conns[c.h2], h2streams, spill, rbuf, rlen, wbuf,
                                        max(cfg.max_queued - c.queued, 0), h2out, h2fields, h2pseudo, h2cookie,
                                        h2huff, h2fb, common, cfg, fresh, stopping, now, ev, wake_at, timers, overdue,
-                                       h2gen, H);
+                                       generation, H);
             ev.kind = NO_EVENT;
             if rest != rlen || wbuf.len > 0 { progress = true; }
             rlen = rest;

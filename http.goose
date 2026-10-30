@@ -337,7 +337,9 @@ fn retire(s: Stream&) {
 
 // A Later's key: the connection's slot, 24 bits of its generation, and 20 of
 // the exchange's number, so a message for a closed connection, or an
-// exchange that has ended, matches no exchange that waits.
+// exchange that has ended, matches no exchange that waits. Connections and
+// h2 streams draw their generations from one counter per loop: with one of
+// their own, a stream's key could repeat a gone HTTP/1.1 exchange's.
 fn later_base(slot: i64, gen: u64) -> u64 { ((slot as u64) << 44) | ((gen & 0xFFFFFF) << 20) }
 fn later_slot(key: u64) -> i64 { (key >> 44) as i64 }
 

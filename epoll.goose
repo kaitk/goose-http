@@ -169,6 +169,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var overdue: u64[>..] = [];
     // Connections owed another turn, by slot, for reads or a drain credit.
     var turns: u64[>..] = [];
+    // The generation of each connection and h2 stream: one counter, so no
+    // stream's key repeats an earlier connection's in its slot (later_base).
     var generation: u64 = 0;
     let nothing = Request { .. };
     let none = Event { kind: NO_EVENT, req: nothing, data: "", whole: false, trailers: "" };
@@ -187,8 +189,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     for fd in lfds { paused_at.push(false); }
     var paused = false;
     // h2c's connections and streams, empty unless a listener serves h2c;
-    // the worker's scratch for them; the streams' generations for later's
-    // keys; and the stream a WAKE or TIMEOUT is for, while go hands it on.
+    // the worker's scratch for them; and the stream a WAKE or TIMEOUT is
+    // for, while go hands it on.
     reusable var h2conns: H2Conn[>..] = [];
     reusable var h2streams: H2Stream<S>[>..] = [];
     var h2out: u8[>..] = [];
@@ -197,7 +199,6 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var h2cookie: u8[>..] = [];
     var h2huff: u8[>..] = [];
     var h2fb: u8[>..] = [];
-    var h2gen: u64 = 0;
     var wake_at: i64 = -1;
     // The slot go drives.
     var driving: i64 = -1;
@@ -333,7 +334,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 let before = wbuf.len;
                 let rest, full = h2_answer(c, driving, h2conns[c.h2], h2streams, spill, rbuf, rlen, wbuf, cfg.write_buffer,
                                            h2out, h2fields, h2pseudo, h2cookie, h2huff, h2fb, common, cfg, fresh, stopping, now, ev,
-                                           wake_at, timers, overdue, h2gen, H);
+                                           wake_at, timers, overdue, generation, H);
                 let moved = rest != rlen || wbuf.len > before;
                 rlen = rest;
                 EpollTurn { moved: moved, full: full }

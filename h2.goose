@@ -137,9 +137,9 @@ fn h2_conn(cfg: const Config&, now: i64) -> H2Conn {
     return H2Conn { ours: h2_settings_of(cfg), recv_window: H2_INITIAL_WINDOW, refilled: now, .. };
 }
 
-// The key of a stream's later: its connection's slot, the stream's own
-// generation, and its index in the stream pool (decisions, "An h2 stream is
-// an exchange").
+// The key of a stream's later: its connection's slot, a generation from the
+// counter connections draw theirs from, and its index in the stream pool
+// (decisions, "An h2 stream is an exchange").
 fn h2_key(slot: i64, gen: u64, index: i64) -> u64 {
     return later_base(slot, gen) | ((index as u64) & 0xFFFFF);
 }

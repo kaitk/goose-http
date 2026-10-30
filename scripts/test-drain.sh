@@ -10,6 +10,9 @@ python3 "$root/scripts/test-drain-turns.py" "$root/build/drain-turns"
 "$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/timeout-live" \
     "$root/scripts/fixtures/timeout_live.goose"
 python3 "$root/scripts/test-timeout-live.py" "$root/build/timeout-live"
+"$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/later-keys" \
+    "$root/scripts/fixtures/later_keys.goose"
+python3 "$root/scripts/test-later-keys.py" "$root/build/later-keys"
 if [ "$(uname -s)" = Linux ]; then
     "$GOOSE" build --cc "${CC:-gcc}" --standalone -o "$root/build/drain" "$root/examples/drain.goose"
     python3 "$root/scripts/test-drain.py" "$root/build/drain"
