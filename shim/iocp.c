@@ -412,6 +412,11 @@ int32_t ur_probe(void) { return 0; }
 /* A ring keeps one AcceptEx posted (struct ur's acc), so one listener. */
 int32_t ur_listeners(void) { return 1; }
 
+/* No gathered sends yet: the loop copies shared ranges into its output, and
+   ur_send_shared isn't called. */
+uint8_t ur_gathers(int64_t h) { return 0; }
+int32_t ur_send_shared(int64_t h, int32_t fd, uint64_t tag, ur_bytes data) { return -UR_ENOSYS; }
+
 /* net_arm arms no socket here yet: shim/net_win.c's is ENOSYS. */
 void ur_bind(int64_t h, uint64_t tag) {}
 uint64_t ur_socket(int64_t h, int32_t k) { return 0; }

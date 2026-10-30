@@ -81,8 +81,14 @@ int64_t net_waker(int32_t ep, uint64_t tag);
 int64_t net_sendfile(int32_t s, int64_t fd, int64_t off, int64_t len);
 void net_file_close(int64_t fd);
 
+/* From shim/shared.c: a gathered send's claim on its bytes. */
+struct shared_claim *shared_claim_take(const uint8_t *data, int64_t len);
+int64_t shared_claim_len(const struct shared_claim *c);
+int64_t shared_claim_send(int32_t fd, const struct shared_claim *c, int64_t off);
+void shared_claim_free(struct shared_claim *c);
+
 /* A send's bytes, owned by the ring until they're sent, or a file's send
-   (RP(send_file)), which has none. */
+   (RP(send_file)), or a gathered one's (RP(send_shared)), which have none. */
 struct rp_send {
     struct rp_send *next;
     uint64_t tag;
@@ -90,6 +96,7 @@ struct rp_send {
     uint32_t cap;           /* data's size */
     int64_t file;           /* -1 for a send of data */
     int64_t foff, fleft;
+    struct shared_claim *claim;     /* a gathered send's bytes, or NULL */
     unsigned char data[];
 };
 
@@ -177,6 +184,8 @@ static struct rp_send *rp_send_alloc(struct rp *u, int64_t len) {
 static void rp_send_free(struct rp *u, struct rp_send *s) {
     if (s->file >= 0) net_file_close(s->file);
     s->file = -1;
+    if (s->claim) shared_claim_free(s->claim);
+    s->claim = NULL;
     if (s->cap <= RP_SMALL) {
         int k = 0;
         while ((RP_MIN << k) < s->cap) k++;
@@ -361,6 +370,7 @@ int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
     s->len = (uint32_t)data.len;
     s->off = 0;
     s->file = -1;
+    s->claim = NULL;
     memcpy(s->data, data.data, (size_t)data.len);
     if (f->last) f->last->next = s;
     else f->sends = s;
@@ -387,6 +397,35 @@ int32_t RP(send_file)(int64_t h, int32_t fd, uint64_t tag, int64_t file, int64_t
     s->file = file;
     s->foff = off;
     s->fleft = len;
+    s->claim = NULL;
+    if (f->last) f->last->next = s;
+    else f->sends = s;
+    f->last = s;
+    rp_queue(u, fd);
+    return 0;
+}
+
+/* Sends data and the ranges shared_defer deferred into it, with sendmsg, in
+   the next ur_wait after any sends queued before it on fd. Copies only data,
+   and holds the ranges' references (shim/shared.c) until the send ends or
+   fd closes. */
+int32_t RP(send_shared)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
+    struct rp *u = (struct rp *)(intptr_t)h;
+    struct shared_claim *c = shared_claim_take(data.data, data.len);
+    if (!c) return -RP_ENOMEM;
+    struct rp_fd *f = rp_fd_of(u, fd);
+    int32_t r = f ? rp_add(u, fd, f) : -RP_ENOMEM;
+    struct rp_send *s = r < 0 ? NULL : rp_send_alloc(u, 0);
+    if (!s) {
+        shared_claim_free(c);
+        return r < 0 ? r : -RP_ENOMEM;
+    }
+    s->next = NULL;
+    s->tag = tag;
+    s->len = (uint32_t)shared_claim_len(c);
+    s->off = 0;
+    s->file = -1;
+    s->claim = c;
     if (f->last) f->last->next = s;
     else f->sends = s;
     f->last = s;
@@ -452,6 +491,9 @@ int64_t RP(waker)(int64_t h, uint64_t tag) {
 /* There's no io_uring to probe for: the ring is always this emulation. */
 int32_t ur_probe(void) { return -RP_ENOSYS; }
 
+/* Gathers sends (RP(send_shared)): ring.goose's ring_gathers. */
+uint8_t ur_gathers(int64_t h) { return 1; }
+
 /* net_arm arms no socket on the emulation: shim/kqueue.c's stays ENOSYS on
    it. */
 void ur_bind(int64_t h, uint64_t tag) {}
@@ -515,7 +557,7 @@ static void rp_work(struct rp *u, rp_completions out, int32_t *n) {
                 continue;
             }
             rp_bytes rest = { s->data + s->off, (int64_t)(s->len - s->off) };
-            int64_t r = rest.len > 0 ? net_send(fd, rest) : 0;
+            int64_t r = rest.len <= 0 ? 0 : s->claim ? shared_claim_send(fd, s->claim, s->off) : net_send(fd, rest);
             if (r == -RP_EAGAIN) {
                 f->writable = 0;
                 break;
@@ -618,6 +660,7 @@ void RP(destroy)(int64_t h) {
         while (s) {
             struct rp_send *next = s->next;
             if (s->file >= 0) net_file_close(s->file);
+            if (s->claim) shared_claim_free(s->claim);
             free(s);
             s = next;
         }

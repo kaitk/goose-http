@@ -9,6 +9,7 @@ import os;
 import sys;
 import message;
 import h2;
+import shared;
 
 // The epoll tag of Config.port's listener; Config.listeners[k]'s is
 // EPOLL_LISTENER - 2 - k. A connection's is its slot.
@@ -218,6 +219,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     rbuf.resize(cfg.max_head, 0);
     var rlen = 0;
     var wbuf: u8[>..] = [];
+    shared_name(wbuf);
     var woff = 0;
     // On a TLS connection, wbuf[..sealed] is sealed for the socket, and what
     // follows is plaintext still to seal.
@@ -318,6 +320,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         }
         wbuf.clear();
         woff = 0;
+        // Shared ranges go out from their blobs only on a plain socket.
+        shared_gather(c.tls < 0);
         if c.out.len > 0 {
             wbuf.append(c.out);
             spill.free_slice(c.out);
@@ -347,15 +351,26 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 EpollTurn { moved: done > 0, full: full }
             }
         };
-        guard going else { return false; }
+        // Gathering ends with the turn: a CLOSED or HTTP/3 handler, outside
+        // it, copies into its own output.
+        guard going else {
+            shared_gather(false);
+            return false;
+        }
         if rlen > 0 {
             c.held = spill.alloc_slice(rlen);
             copy_into(c.held, rbuf[..rlen]);
         }
-        if woff < wbuf.len {
+        if shared_pending() > 0 {
+            // What of wbuf and the ranges deferred into it the socket didn't take.
+            let left = wbuf.len + shared_pending() - woff;
+            c.out = spill.alloc_slice(left);
+            guard shared_flatten(wbuf, woff, c.out) == left else { return false; }
+        } else if woff < wbuf.len {
             c.out = spill.alloc_slice(wbuf.len - woff);
             copy_into(c.out, wbuf[woff..]);
         }
+        shared_gather(false);
         return true;
     }
 
@@ -408,8 +423,8 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 guard tls_seal(tls, c.tls, wbuf, sealed, c.state == CLOSING) else { return false; }
                 sealed = wbuf.len;
             }
-            while woff < wbuf.len {
-                let w = net_send(c.fd, wbuf[woff..]);
+            while woff < wbuf.len + shared_pending() {
+                let w = if shared_pending() > 0 { shared_send(c.fd, wbuf, woff) } else { net_send(c.fd, wbuf[woff..]) };
                 if w == -EAGAIN { return wait(c, progress); }
                 if w == -EINTR { continue; }
                 guard w > 0 else { return false; }   // EPIPE, ECONNRESET: the client left
@@ -419,6 +434,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             wbuf.clear();
             woff = 0;
             sealed = 0;
+            shared_settle();
             if c.x.stream.framing == Framing.RawDrain && c.state == OPEN && c.x.stream.open {
                 // One credit per turn keeps a publisher with a fast reader
                 // from delaying other sockets, mail, and the timer sweep.
@@ -506,7 +522,7 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         guard c.state != DRAINING else { return true; }
         // A handshake has request_ms from the accept, however it progresses.
         guard c.tls < 0 || tls_ready(tls, c.tls) else { return true; }
-        let writing = woff < wbuf.len || c.x.stream.file >= 0;
+        let writing = woff < wbuf.len + shared_pending() || c.x.stream.file >= 0;
         // An h2c connection's streams have their own limits (later's), so
         // the connection's is idle_ms, or write_ms while the client doesn't
         // take what it was sent.

@@ -12,6 +12,7 @@ import sys;
 import message;
 import ring;
 import h2;
+import shared;
 
 // A request's tag: the connection's slot in the low 32 bits and a
 // generation above, so a completion that arrives after its connection
@@ -117,6 +118,8 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         close_listeners();
         return Error { call: "io_uring", code: -r };
     }
+    // Whether shared ranges go out from their blobs (ring_send_shared).
+    let gathers = ring_gathers(r);
     let waker = ring_waker(r, RING_WAKE);
     guard waker >= 0 else {
         close_listeners();
@@ -200,6 +203,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     rbuf.resize(cfg.max_head, 0);
     var rlen = 0;
     var wbuf: u8[>..] = [];
+    shared_name(wbuf);
     // A TLS connection's received records, and the plaintext they gave.
     var wire: u8[>..] = [];
     var plain: u8[>..] = [];
@@ -299,10 +303,12 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             c.deadline = now;
             return;
         }
-        guard wbuf.len > 0 else { return; }
-        let e = ring_send(r, c.fd, c.tag, wbuf);
+        let deferred = shared_pending();
+        guard wbuf.len + deferred > 0 else { return; }
+        let e = if deferred > 0 { ring_send_shared(r, c.fd, c.tag, wbuf) } else { ring_send(r, c.fd, c.tag, wbuf) };
+        if deferred > 0 { shared_taken(); }
         guard e >= 0 else { return Error { call: "send", code: -e } from spin; }
-        c.queued += wbuf.len;
+        c.queued += wbuf.len + deferred;
         wbuf.clear();
     }
 
@@ -444,8 +450,13 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         drain(c);
     }
 
+    // Shared ranges go out from their blobs only on a plain socket, and only
+    // while handlers answer here: pump flushes them all before it returns.
     fn feed(c: RingConn<S>&, buf: i32, src: const u8[:], n: i64, wake: const Event&) {
-        if c.h2 >= 0 { pump_h2(c, buf, src, n, wake); } else { pump(c, buf, src, n, wake); }
+        if c.h2 >= 0 { pump_h2(c, buf, src, n, wake); return; }
+        shared_gather(gathers && c.tls < 0);
+        pump(c, buf, src, n, wake);
+        shared_gather(false);
     }
 
     // Goes on with c's exchange, which waited, with ev, its WAKE or TIMEOUT,

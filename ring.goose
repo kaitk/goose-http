@@ -45,6 +45,14 @@ extern "ur_accept" fn ring_accept(r: i64, fd: i32, tag: u64);
 extern "ur_recv" fn ring_recv(r: i64, fd: i32, tag: u64);
 // A send goes out after those queued before it on fd, one at a time.
 extern "ur_send" fn ring_send(r: i64, fd: i32, tag: u64, data: const u8[:]) -> i32;
+// Whether ring_send_shared works on r: everywhere but Windows.
+extern "ur_gathers" fn ring_gathers(r: i64) -> bool;
+// ring_send, of data and the shared ranges send_shared deferred into it
+// (shared.goose), which the ring sends from their blobs with the bytes
+// around them. It takes over their references and releases them once the
+// send ends or fd closes, also when this fails. Its completions count every
+// byte, data's and the ranges'.
+extern "ur_send_shared" fn ring_send_shared(r: i64, fd: i32, tag: u64, data: const u8[:]) -> i32;
 // Sends len bytes of file, a handle net_file_open returned, from off, after
 // those queued before it on fd, without copying them through the program:
 // with splice through a pipe on io_uring, TransmitFile on Windows, and
