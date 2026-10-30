@@ -1,0 +1,3 @@
+// ks_set's C is goose-tls's. A sidecar of the test's own keeps its extern out of
+// package http's, whose JIT library would otherwise need it.
+c_sources = [];

@@ -113,7 +113,10 @@ port + 363 (`H2_PORT`, 8443 beside 8080).
 
 1. `goose --check` of each root file: `server/server.goose`, `server/server_epoll.goose`,
    `server/server_tls.goose`, and the examples listed in `scripts/test.sh`.
-2. `test/run_tests.py`: the tests in `test/` ([below](#run-the-tests-in-test)).
+2. `test/run_tests.py`: the tests in `test/` ([below](#run-the-tests-in-test)). Then, but
+   on Windows, one of them through the JIT, as `goose file.goose` runs a program, which
+   loads the package's library: a test's extern needs a sidecar of its own, or that
+   library needs the extern's C (v0.5.14).
 3. For each loop, `scripts/build.sh` and then `scripts/test-http.sh`: uring and epoll on
    Linux and macOS, with `LOOP=uring-epoll` against the uring build on Linux too, and
    iocp on Windows. The uring and epoll loops' build is the TLS build (`TLS=1`), run

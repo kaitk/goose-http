@@ -2,7 +2,7 @@
 # Runs every test this repository has, and fails on the first failure: the
 # typecheck of the server's and the examples' root files, the tests in test/
 # (test/run_tests.py, which typechecks and runs each one and reports every
-# failure among them), then each loop's build of the server
+# failure among them), one of them through the JIT, then each loop's build of the server
 # (scripts/build.sh) with scripts/test-http.sh against it, which tests h2c
 # too where the loop serves it, and TLS on each loop but iocp from one TLS
 # build (TLS=1), with full load runs on the first loop and short ones after,
@@ -71,6 +71,15 @@ done
 
 step "test/run_tests.py"
 python3 "$root/test/run_tests.py"
+
+# A program run through the JIT, as `goose file.goose` runs one, loads the package's
+# library once it calls the shim, and the library needs the C of every extern the
+# package's sidecar covers: a test's extern with none of its own broke every such
+# program (v0.5.14).
+if [ "$loops" != iocp ]; then
+    step "a test through the JIT"
+    "$goose" "$root/test/http/sys_errors.goose" | diff - "$root/test/expected/sys_errors.out"
+fi
 
 case $os in
 Linux | Darwin)
