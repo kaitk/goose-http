@@ -2,6 +2,18 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.17 (2026-11-03)
+
+A fix for TLS choosers that keep state. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
+`v0.0.6`, and goose-compress `v0.1.4`. No breaking changes.
+
+Fixed:
+
+- `http::tls_hello` was given a copy of the worker's chooser, so what it changed, such as
+  a renewed certificate or a challenge taken from mail, was lost at the next hello, and
+  each TLS read copied the chooser. It's given the chooser itself now, as
+  [HTTPS](docs/api.md#https) describes.
+
 ## v0.5.16 (2026-10-30)
 
 A security fix for replies held long. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
