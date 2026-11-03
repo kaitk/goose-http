@@ -142,8 +142,9 @@ fn tls_h2<C>(t: TlsServerOf<C>&, k: i32) -> bool { tls::alpn(t.slots[k].conn) ==
 // Reads plaintext into buf from what slot k holds, through its handshake
 // first, until buf is full or OpenSSL wants more input. Returns the count,
 // and whether the connection is done after it: the client sent
-// close_notify, or the handshake or a record failed.
-fn tls_plain(s: TlsSlot&, buf: u8[:], chooser) -> i64, bool {
+// close_notify, or the handshake or a record failed. The chooser is the
+// server's own, by reference, so what tls_hello changes in it lasts.
+fn tls_plain<C>(s: TlsSlot&, buf: u8[:], chooser: C&) -> i64, bool {
     if !s.ready {
         var h = tls::handshake(s.conn);
         if h == tls::HELLO {

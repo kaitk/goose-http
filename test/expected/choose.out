@@ -11,6 +11,10 @@ serve:
   localhost offering http/1.1:
     the server's certificate, ALPN 'http/1.1'
     HTTP/1.1 200 OK
+  seen.test offering acme-tls/1:
+    refused
+  seen.test offering acme-tls/1:
+    the challenge's certificate, ALPN 'acme-tls/1'
 serve_epoll:
   acme.test offering acme-tls/1:
     the challenge's certificate, ALPN 'acme-tls/1'
@@ -24,3 +28,7 @@ serve_epoll:
   localhost offering http/1.1:
     the server's certificate, ALPN 'http/1.1'
     HTTP/1.1 200 OK
+  seen.test offering acme-tls/1:
+    refused
+  seen.test offering acme-tls/1:
+    the challenge's certificate, ALPN 'acme-tls/1'

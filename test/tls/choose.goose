@@ -3,18 +3,24 @@
 // with a chooser that moves a client sending acme.test in SNI and offering
 // acme-tls/1 to a second context, with a certificate of its own; every other
 // client keeps the server's context, whose ALPN offers h2 and http/1.1. The
-// clients are goose-tls's, each trusting the one certificate it should get.
+// chooser keeps state between hellos: it moves a client sending seen.test only
+// from that name's second hello on. The clients are goose-tls's, each trusting
+// the one certificate it should get.
 import std;
 import os;
 import http from "../../";
 import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import http.tls;
 
-struct Chooser { challenge: tls::Context }
+struct Chooser { challenge: tls::Context, seen: i64 = 0 }
 
 fn http::tls_hello(c: Chooser&, conn: tls::Conn) {
     if tls::server_name(conn) == "acme.test" && tls::offers(conn, "acme-tls/1") {
         tls::use_context(conn, c.challenge);
+    }
+    if tls::server_name(conn) == "seen.test" {
+        c.seen++;
+        if c.seen >= 2 { tls::use_context(conn, c.challenge); }
     }
 }
 
@@ -121,6 +127,8 @@ fn clients(address: const u8[:], normal: const u8[:], challenge: const u8[:]) {
     client(address, "localhost", ["acme-tls/1"], normal, normal);
     client(address, "localhost", ["h2", "http/1.1"], normal, normal);
     client(address, "localhost", ["http/1.1"], normal, normal);
+    client(address, "seen.test", ["acme-tls/1"], challenge, normal);
+    client(address, "seen.test", ["acme-tls/1"], challenge, normal);
 }
 
 fn main() {
@@ -134,7 +142,7 @@ fn main() {
         normal_key = tls::key_pem(k);
         tls::free(k);
         let a = tls::key_generate(tls::P256);
-        challenge = tls::self_signed(a, ["acme.test"], 1);
+        challenge = tls::self_signed(a, ["acme.test", "seen.test"], 1);
         challenge_key = tls::key_pem(a);
         tls::free(a);
     };
