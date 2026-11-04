@@ -783,6 +783,18 @@ and `body`. `Session.max_body`, 16 MB by default, is the most body a response ma
 as sent. `Session.via` is an address to connect to in place of the URL's host and port,
 such as `unix:/run/app.sock`; TLS still checks the URL's host.
 
+`Session.ms` limits each wait, the lookup and connect, the TLS handshake's reads, each
+send, and each read, so a server that sends a byte at a time can hold a request for as
+long as it likes. `Session.deadline` bounds the request in all: a time on the clock
+that `http::deadline(ms)` reads, -1 by default for none. Each wait then takes at most the
+time left, and a request still going at the deadline fails with `ETIMEDOUT`, its
+`call` the step it was in. A deadline set once covers every request the session makes
+until it changes, such as each of a redirect's hops:
+
+```rust
+session.deadline = http::deadline(10000);   // these requests, all within 10 s
+```
+
 - A session keeps its connection, and reuses it for the next request to the same scheme,
   host, and port, unless the server answered with `Connection: close` or has closed it
   since. It doesn't send a request again on a connection that fails.

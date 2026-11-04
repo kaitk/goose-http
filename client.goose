@@ -30,9 +30,14 @@ import socket;
 // A client's settings and its open connection, which the next request to the
 // same scheme, host, and port reuses.
 struct Session {
-    // The limit in milliseconds on each wait: the connect, a send, a read
-    // (-1: none). A host name's lookup isn't bounded by it.
+    // The limit in milliseconds on each wait: a host name's lookup with the
+    // connect, a send, a read (-1: none).
     ms: i64 = 30000,
+    // The time by which each request must be done, on the clock deadline(ms)
+    // reads, or -1 for none. Each wait takes at most the time left, and one
+    // past it fails with ETIMEDOUT, so a server that sends a byte at a time
+    // can't hold a request longer.
+    deadline: i64 = -1,
     // The most body a response may have, in bytes as sent.
     max_body: i64 = 16 << 20,
     // An address to connect to in place of the URL's host and port, such as
@@ -280,7 +285,8 @@ fn open(s: Session&, u: Url) -> Error {
     }
     hangup(s);
     let to = if s.via.len > 0 { s.via[..] } else { u.host };
-    let sock, e = connect(to, u.port, s.ms);
+    guard !expired(s) else { return Error { call: "connect", code: ETIMEDOUT }; }
+    let sock, e = connect(to, u.port, wait_ms(s));
     guard e.code == 0 else { return e; }
     s.s = sock;
     if u.secure {
@@ -308,7 +314,8 @@ fn handshake(s: Session&) -> Error {
         guard e.code == 0 else { return e; }
         if r == 0 { return no_error(); }
         guard r == tls::WANT_INPUT else { return client_error("tls"); }
-        let n = recv(s.s, wire, s.ms);
+        guard !expired(s) else { return Error { call: "recv", code: ETIMEDOUT }; }
+        let n = recv(s.s, wire, wait_ms(s));
         guard n > 0 else { return Error { call: "recv", code: if n == 0 { ECONNRESET } else { -n } }; }
         guard tls::feed(s.c, wire[..n]) == n else { return client_error("tls"); }
     }
@@ -320,14 +327,16 @@ fn flush(s: Session&) -> Error {
     loop {
         let n = tls::drain(s.c, buf);
         guard n > 0 else { return no_error(); }
-        let e = send_all(s.s, buf[..n], s.ms);
+        guard !expired(s) else { return Error { call: "send", code: ETIMEDOUT }; }
+        let e = send_all(s.s, buf[..n], wait_ms(s));
         guard e.code == 0 else { return e; }
     }
 }
 
 // Sends bytes on the session's connection.
 fn put(s: Session&, bytes: const u8[:]) -> Error {
-    guard tls::ok(s.c) else { return send_all(s.s, bytes, s.ms); }
+    guard !expired(s) else { return Error { call: "send", code: ETIMEDOUT }; }
+    guard tls::ok(s.c) else { return send_all(s.s, bytes, wait_ms(s)); }
     guard tls::write(s.c, bytes) == bytes.len else { return client_error("tls"); }
     return flush(s);
 }
@@ -336,8 +345,9 @@ fn put(s: Session&, bytes: const u8[:]) -> Error {
 // server has closed it. Under TLS, only close_notify is a close: a socket
 // that ends without it could cut a body that ends with the connection.
 fn take(s: Session&, buf: u8[:]) -> i64, Error {
+    guard !expired(s) else { return 0, Error { call: "recv", code: ETIMEDOUT }; }
     guard tls::ok(s.c) else {
-        let n = recv(s.s, buf, s.ms);
+        let n = recv(s.s, buf, wait_ms(s));
         return if n >= 0 { n } else { 0 }, if n >= 0 { no_error() } else { Error { call: "recv", code: -n } };
     }
     var wire: u8[16384] = [0; 16384];
@@ -346,10 +356,21 @@ fn take(s: Session&, buf: u8[:]) -> i64, Error {
         if n > 0 { return n, no_error(); }
         if n == tls::CLOSED { return 0, no_error(); }
         guard n == tls::WANT_INPUT else { return 0, client_error("tls"); }
-        let m = recv(s.s, wire, s.ms);
+        guard !expired(s) else { return 0, Error { call: "recv", code: ETIMEDOUT }; }
+        let m = recv(s.s, wire, wait_ms(s));
         guard m > 0 else { return 0, Error { call: "recv", code: if m == 0 { ECONNRESET } else { -m } }; }
         guard tls::feed(s.c, wire[..m]) == m else { return 0, client_error("tls"); }
     }
+}
+
+fn expired(s: const Session&) -> bool { s.deadline >= 0 && net_clock_ms() >= s.deadline }
+
+// The limit on the session's next wait: ms, or the time left before its
+// deadline, whichever is less.
+fn wait_ms(s: const Session&) -> i64 {
+    guard s.deadline >= 0 else { return s.ms; }
+    let left = max(s.deadline - net_clock_ms(), 0);
+    return if s.ms < 0 { left } else { min(s.ms, left) };
 }
 
 // Closes the session's connection, if one is open.

@@ -1,0 +1,18 @@
+== no deadline
+200 xxxxxxxxxx
+  in time: true
+== a deadline 300 ms away
+failed: recv ETIMEDOUT
+  in time: true
+failed: recv ETIMEDOUT
+  in time: true
+failed: recv ETIMEDOUT
+  in time: true
+failed: recv ETIMEDOUT
+  in time: true
+== a deadline past
+failed: connect ETIMEDOUT
+  in time: true
+== a deadline that leaves time
+200 xxxxxxxxxx
+  in time: true
