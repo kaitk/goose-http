@@ -2,6 +2,24 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.18 (2026-11-04)
+
+A deadline for client requests. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
+`v0.0.6`, and goose-compress `v0.1.4`. No breaking changes.
+
+Added:
+
+- `Session.deadline` bounds each request in all, on the clock `http::deadline(ms)` reads,
+  -1 by default for none. Each wait takes at most the time left, and a request still going
+  at the deadline fails with `ETIMEDOUT`, so a server that sends a byte at a time can't
+  hold it longer. See [the client](docs/api.md).
+
+Changed:
+
+- `http::connect(host, port, ms)` bounds the name lookup by `ms` too: with a limit,
+  `getaddrinfo` runs on a detached thread of its own, which the call stops waiting for at
+  the limit. With `ms` -1 the lookup blocks as before.
+
 ## v0.5.17 (2026-11-03)
 
 A fix for TLS choosers that keep state. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls
