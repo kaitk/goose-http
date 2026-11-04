@@ -670,10 +670,12 @@ http::hangup(s);
 
 - `http::connect(host, port, ms)` returns the socket, connected, or `Socket { fd: -1 }`
   and an `http::Error`: `connect`'s `ECONNREFUSED`, `ETIMEDOUT` past `ms`, and the like,
-  or `connect_start`'s. A name is resolved first, which `ms` doesn't bound: `resolve`'s
-  `ENOENT` for a name with no address, or `EAGAIN` for a lookup that failed for now.
-  Its addresses are tried in the resolver's order, up to 8, all within `ms`, and the
-  error is the last one's.
+  or `connect_start`'s. A name is resolved first, within `ms` too: `resolve`'s `ENOENT`
+  for a name with no address, `EAGAIN` for a lookup that failed for now, or `ETIMEDOUT`
+  past `ms`. With a limit, the lookup runs on a thread of its own, which the call stops
+  waiting for at the limit and which ends alone when the resolver gives up. Its
+  addresses are tried in the resolver's order, up to 8, all within `ms`, and the error
+  is the last one's.
 - `http::send_all(s, data, ms)` sends all of `data` within `ms` in all, and returns an
   `http::Error` whose code is 0, `ETIMEDOUT`, or the send's, such as `EPIPE` once the
   server has closed.

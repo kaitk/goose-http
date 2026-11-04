@@ -128,8 +128,10 @@ extern fn net_connect(addr: const u8[:], port: i32, flags: i32) -> i32;
 // The addresses host names, from getaddrinfo, each 16 bytes into out as
 // net_connect takes them, in the resolver's order: how many, or -ENOENT for a
 // name with none, -EAGAIN for a lookup that failed for now, or -EINVAL. It
-// blocks until the lookup ends, so only a thread that may block calls it.
-extern fn net_resolve(host: const u8[:], out: u8[:]) -> i32;
+// blocks, so only a thread that may block calls it: for as long as the
+// lookup takes with ms -1, or else up to ms milliseconds, then -ETIMEDOUT,
+// while the lookup ends on a thread of its own.
+extern fn net_resolve(host: const u8[:], out: u8[:], ms: i32) -> i32;
 extern fn net_connected(fd: i32) -> i32;
 // Waits up to ms (-1: no limit) for fd to be ready for events, EPOLLIN and
 // EPOLLOUT. Returns the bits it's ready for, EPOLLERR and EPOLLHUP among

@@ -545,14 +545,9 @@ int32_t net_connect(net_bytes addr, int32_t port, int32_t flags) {
     return fd;
 }
 
-/* The addresses host names, as shim/net.c's net_resolve gives them, with
+/* The addresses name has, as shim/net.c's net_lookup_now gives them, with
    Linux's error numbers. */
-int32_t net_resolve(net_bytes host, net_bytes out) {
-    char name[256];
-    if (host.len <= 0 || host.len >= (int64_t)sizeof name || memchr(host.data, 0, (size_t)host.len))
-        return -net_err(EINVAL);
-    memcpy(name, host.data, (size_t)host.len);
-    name[host.len] = 0;
+static int32_t net_lookup_now(const char *name, uint8_t *out, int64_t cap) {
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM, .ai_flags = AI_ADDRCONFIG };
     struct addrinfo *list;
     int r = getaddrinfo(name, NULL, &hints, &list);
@@ -561,8 +556,8 @@ int32_t net_resolve(net_bytes host, net_bytes out) {
     if (r == EAI_NONAME || r == EAI_NODATA) return -net_err(ENOENT);
     if (r) return -net_err(EINVAL);
     int32_t n = 0;
-    for (struct addrinfo *a = list; a && (int64_t)(n + 1) * 16 <= out.len; a = a->ai_next) {
-        uint8_t *p = out.data + n * 16;
+    for (struct addrinfo *a = list; a && (int64_t)(n + 1) * 16 <= cap; a = a->ai_next) {
+        uint8_t *p = out + n * 16;
         if (a->ai_family == AF_INET) {
             memset(p, 0, 10);
             p[10] = p[11] = 0xff;
@@ -575,6 +570,75 @@ int32_t net_resolve(net_bytes host, net_bytes out) {
     }
     freeaddrinfo(list);
     return n ? n : -net_err(ENOENT);
+}
+
+/* A lookup on a thread of its own, as shim/net.c's. */
+struct net_lookup {
+    pthread_mutex_t lock;
+    pthread_cond_t ended;
+    int refs, done;
+    int32_t result;
+    char name[256];
+    int64_t cap;
+    uint8_t out[];
+};
+
+static void net_lookup_release(struct net_lookup *l) {
+    int last = --l->refs == 0;
+    pthread_mutex_unlock(&l->lock);
+    if (!last) return;
+    pthread_cond_destroy(&l->ended);
+    pthread_mutex_destroy(&l->lock);
+    free(l);
+}
+
+static void *net_lookup_run(void *arg) {
+    struct net_lookup *l = arg;
+    int32_t r = net_lookup_now(l->name, l->out, l->cap);
+    pthread_mutex_lock(&l->lock);
+    l->result = r;
+    l->done = 1;
+    pthread_cond_signal(&l->ended);
+    net_lookup_release(l);
+    return NULL;
+}
+
+/* The addresses host names, as shim/net.c's net_resolve gives them. macOS
+   has no monotonic clock for a condition's wait, so it waits by the time
+   left, on net_clock_ms's clock. */
+int32_t net_resolve(net_bytes host, net_bytes out, int32_t ms) {
+    char name[256];
+    if (host.len <= 0 || host.len >= (int64_t)sizeof name || memchr(host.data, 0, (size_t)host.len))
+        return -net_err(EINVAL);
+    memcpy(name, host.data, (size_t)host.len);
+    name[host.len] = 0;
+    if (ms < 0) return net_lookup_now(name, out.data, out.len);
+    struct net_lookup *l = calloc(1, sizeof *l + (size_t)out.len);
+    if (!l) return -net_err(ENOMEM);
+    memcpy(l->name, name, sizeof name);
+    l->cap = out.len;
+    l->refs = 2;
+    pthread_mutex_init(&l->lock, NULL);
+    pthread_cond_init(&l->ended, NULL);
+    int64_t until = net_clock_ms() + ms;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    int started = pthread_create(&t, &attr, net_lookup_run, l) == 0;
+    pthread_attr_destroy(&attr);
+    pthread_mutex_lock(&l->lock);
+    if (!started) l->refs = 1;
+    while (started && !l->done) {
+        int64_t left = until - net_clock_ms();
+        if (left <= 0) break;
+        struct timespec wait = { .tv_sec = left / 1000, .tv_nsec = (long)(left % 1000) * 1000000 };
+        pthread_cond_timedwait_relative_np(&l->ended, &l->lock, &wait);
+    }
+    int32_t r = l->done ? l->result : started ? -net_err(ETIMEDOUT) : -net_err(EAGAIN);
+    if (r > 0) memcpy(out.data, l->out, (size_t)r * 16);
+    net_lookup_release(l);
+    return r;
 }
 
 /* How net_connect's connect on fd ended: 0 once connected, -EINPROGRESS

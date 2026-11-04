@@ -24,6 +24,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef SOMAXCONN_HINT
@@ -361,16 +362,9 @@ int32_t net_connect(net_bytes addr, int32_t port, int32_t flags) {
     return (int32_t)s;
 }
 
-/* The addresses host names, as shim/net.c's net_resolve gives them:
+/* The addresses name has, as shim/net.c's net_lookup_now gives them:
    -ENOENT, -EAGAIN, or -EINVAL from Winsock's own codes for those cases. */
-int32_t net_resolve(net_bytes host, net_bytes out) {
-    int32_t r = net_win_init();
-    if (r < 0) return r;
-    char name[256];
-    if (host.len <= 0 || host.len >= (int64_t)sizeof name || memchr(host.data, 0, (size_t)host.len))
-        return -22;
-    memcpy(name, host.data, (size_t)host.len);
-    name[host.len] = 0;
+static int32_t net_lookup_now(const char *name, uint8_t *out, int64_t cap) {
     struct addrinfo hints = { 0 };
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -381,8 +375,8 @@ int32_t net_resolve(net_bytes host, net_bytes out) {
     if (err == WSAHOST_NOT_FOUND || err == WSANO_DATA) return -2;
     if (err) return -net_win_err(err);
     int32_t n = 0;
-    for (struct addrinfo *a = list; a && (int64_t)(n + 1) * 16 <= out.len; a = a->ai_next) {
-        uint8_t *p = out.data + n * 16;
+    for (struct addrinfo *a = list; a && (int64_t)(n + 1) * 16 <= cap; a = a->ai_next) {
+        uint8_t *p = out + n * 16;
         if (a->ai_family == AF_INET) {
             memset(p, 0, 10);
             p[10] = p[11] = 0xff;
@@ -395,6 +389,67 @@ int32_t net_resolve(net_bytes host, net_bytes out) {
     }
     freeaddrinfo(list);
     return n ? n : -2;
+}
+
+/* A lookup on a thread of its own, as shim/net.c's. */
+struct net_lookup {
+    SRWLOCK lock;
+    CONDITION_VARIABLE ended;
+    int refs, done;
+    int32_t result;
+    char name[256];
+    int64_t cap;
+    uint8_t out[];
+};
+
+static void net_lookup_release(struct net_lookup *l) {
+    int last = --l->refs == 0;
+    ReleaseSRWLockExclusive(&l->lock);
+    if (last) free(l);
+}
+
+static DWORD WINAPI net_lookup_run(LPVOID arg) {
+    struct net_lookup *l = arg;
+    int32_t r = net_lookup_now(l->name, l->out, l->cap);
+    AcquireSRWLockExclusive(&l->lock);
+    l->result = r;
+    l->done = 1;
+    WakeConditionVariable(&l->ended);
+    net_lookup_release(l);
+    return 0;
+}
+
+/* The addresses host names, as shim/net.c's net_resolve gives them. */
+int32_t net_resolve(net_bytes host, net_bytes out, int32_t ms) {
+    int32_t r = net_win_init();
+    if (r < 0) return r;
+    char name[256];
+    if (host.len <= 0 || host.len >= (int64_t)sizeof name || memchr(host.data, 0, (size_t)host.len))
+        return -22;
+    memcpy(name, host.data, (size_t)host.len);
+    name[host.len] = 0;
+    if (ms < 0) return net_lookup_now(name, out.data, out.len);
+    struct net_lookup *l = calloc(1, sizeof *l + (size_t)out.len);
+    if (!l) return -12;
+    memcpy(l->name, name, sizeof name);
+    l->cap = out.len;
+    l->refs = 2;
+    InitializeSRWLock(&l->lock);
+    InitializeConditionVariable(&l->ended);
+    ULONGLONG until = GetTickCount64() + (ULONGLONG)ms;
+    HANDLE t = CreateThread(NULL, 0, net_lookup_run, l, 0, NULL);
+    if (t) CloseHandle(t);
+    AcquireSRWLockExclusive(&l->lock);
+    if (!t) l->refs = 1;
+    while (t && !l->done) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= until) break;
+        SleepConditionVariableSRW(&l->ended, &l->lock, (DWORD)(until - now), 0);
+    }
+    r = l->done ? l->result : t ? -110 : -11;
+    if (r > 0) memcpy(out.data, l->out, (size_t)r * 16);
+    net_lookup_release(l);
+    return r;
 }
 
 /* How net_connect's connect on fd ended, as shim/net.c's: 0, -EINPROGRESS,

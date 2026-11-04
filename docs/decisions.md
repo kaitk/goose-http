@@ -684,9 +684,12 @@ name with `getaddrinfo` in the shim, and tries its addresses in the resolver's o
 within the call's time limit: a lane may block, and goose-acme's requests to Let's
 Encrypt's directory need a name. `connect_start` still fails a name with `ENOSYS` from
 `resolve`, since `getaddrinfo` would block the loop. This replaces "a host is
-`localhost`, a literal, or `unix:PATH`" for the blocking call. The time limit doesn't
-cover the lookup, which `getaddrinfo` can't bound; the system resolver's own timeouts
-apply. Rejected for now: a resolver for the loop, on a lane or with a DNS client of its
+`localhost`, a literal, or `unix:PATH`" for the blocking call. The time limit covers
+the lookup too (2026-11-04): `getaddrinfo` can't be bounded or stopped, so with a
+limit it runs on a detached thread of its own, which the call stops waiting for at the
+limit, and which ends when the system resolver's own timeouts do. A lookup costs a
+thread's start, small beside a lookup, and only the blocking call makes one. Rejected
+for that: glibc's `getaddrinfo_a`, which Linux alone has. Rejected for now: a resolver for the loop, on a lane or with a DNS client of its
 own, which waits until a handler needs a name; and Happy Eyeballs, racing IPv6 against
 IPv4, for a call a lane makes once per connection.
 

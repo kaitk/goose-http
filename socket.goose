@@ -134,10 +134,10 @@ let RESOLVED_MAX = 8;
 // send_all wait for it. An error as connect_start's, or ETIMEDOUT.
 //
 // A host that is a name is resolved first, with the system's resolver,
-// which the time limit doesn't bound: resolve's ENOENT for a name with no
-// address, or EAGAIN for a lookup that failed for now. Its addresses are
-// tried in the resolver's order, up to RESOLVED_MAX, all within ms; the
-// error is the last one's.
+// within ms too: resolve's ENOENT for a name with no address, EAGAIN for a
+// lookup that failed for now, or ETIMEDOUT. Its addresses are tried in the
+// resolver's order, up to RESOLVED_MAX, all within ms; the error is the last
+// one's.
 fn connect(host: const u8[:], port: i64, ms: i64) -> Socket, Error {
     let until = deadline(ms);
     let a, numeric = literal(host);
@@ -148,7 +148,7 @@ fn connect(host: const u8[:], port: i64, ms: i64) -> Socket, Error {
     }
     guard port > 0 && port < 65536 else { return Socket { .. }, Error { call: "connect", code: EINVAL }; }
     var addrs: u8[16 * RESOLVED_MAX] = [0; 16 * RESOLVED_MAX];
-    let n = net_resolve(host, addrs);
+    let n = net_resolve(host, addrs, if ms < 0 { -1 } else { min(ms, 1 << 30) as i32 });
     guard n > 0 else { return Socket { .. }, Error { call: "resolve", code: -n }; }
     var e = no_error();
     for i in n {

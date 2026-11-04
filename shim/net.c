@@ -428,17 +428,11 @@ int32_t net_connect(net_bytes addr, int32_t port, int32_t flags) {
     return fd;
 }
 
-/* The addresses host names, from getaddrinfo, in its order: each 16 bytes
+/* The addresses name has, from getaddrinfo, in its order: each 16 bytes
    into out, an IPv4 one IPv4-mapped, as net_connect takes them, at most
-   out.len / 16. Returns how many, or -ENOENT for a name with no address,
-   -EAGAIN for a lookup that failed for now, or -EINVAL for text that can't
-   be a name. Blocks for as long as the lookup takes. */
-int32_t net_resolve(net_bytes host, net_bytes out) {
-    char name[256];
-    if (host.len <= 0 || host.len >= (int64_t)sizeof name || memchr(host.data, 0, (size_t)host.len))
-        return -EINVAL;
-    memcpy(name, host.data, (size_t)host.len);
-    name[host.len] = 0;
+   cap / 16. Returns how many, or -ENOENT for a name with no address, -EAGAIN
+   for a lookup that failed for now, or -EINVAL. */
+static int32_t net_lookup_now(const char *name, uint8_t *out, int64_t cap) {
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM, .ai_flags = AI_ADDRCONFIG };
     struct addrinfo *list;
     int r = getaddrinfo(name, NULL, &hints, &list);
@@ -447,8 +441,8 @@ int32_t net_resolve(net_bytes host, net_bytes out) {
     if (r == EAI_NONAME || r == EAI_NODATA) return -ENOENT;
     if (r) return -EINVAL;
     int32_t n = 0;
-    for (struct addrinfo *a = list; a && (int64_t)(n + 1) * 16 <= out.len; a = a->ai_next) {
-        uint8_t *p = out.data + n * 16;
+    for (struct addrinfo *a = list; a && (int64_t)(n + 1) * 16 <= cap; a = a->ai_next) {
+        uint8_t *p = out + n * 16;
         if (a->ai_family == AF_INET) {
             memset(p, 0, 10);
             p[10] = p[11] = 0xff;
@@ -461,6 +455,88 @@ int32_t net_resolve(net_bytes host, net_bytes out) {
     }
     freeaddrinfo(list);
     return n ? n : -ENOENT;
+}
+
+/* A lookup on a thread of its own, which its caller can stop waiting for:
+   getaddrinfo has no time limit, and can't be stopped. The caller and the
+   thread each hold a reference, and the last to let go frees it. */
+struct net_lookup {
+    pthread_mutex_t lock;
+    pthread_cond_t ended;
+    int refs, done;
+    int32_t result;
+    char name[256];
+    int64_t cap;
+    uint8_t out[];
+};
+
+/* Drops a reference to l, whose lock the caller holds, and unlocks it. */
+static void net_lookup_release(struct net_lookup *l) {
+    int last = --l->refs == 0;
+    pthread_mutex_unlock(&l->lock);
+    if (!last) return;
+    pthread_cond_destroy(&l->ended);
+    pthread_mutex_destroy(&l->lock);
+    free(l);
+}
+
+static void *net_lookup_run(void *arg) {
+    struct net_lookup *l = arg;
+    int32_t r = net_lookup_now(l->name, l->out, l->cap);
+    pthread_mutex_lock(&l->lock);
+    l->result = r;
+    l->done = 1;
+    pthread_cond_signal(&l->ended);
+    net_lookup_release(l);
+    return NULL;
+}
+
+/* The addresses host names, as net_lookup_now gives them, into out, or
+   -EINVAL for text that can't be a name. With ms -1, it blocks for as long
+   as the lookup takes. Otherwise the lookup runs on a thread of its own, and
+   after ms milliseconds the call returns -ETIMEDOUT and leaves the thread to
+   end alone; -EAGAIN when no thread could start. */
+int32_t net_resolve(net_bytes host, net_bytes out, int32_t ms) {
+    char name[256];
+    if (host.len <= 0 || host.len >= (int64_t)sizeof name || memchr(host.data, 0, (size_t)host.len))
+        return -EINVAL;
+    memcpy(name, host.data, (size_t)host.len);
+    name[host.len] = 0;
+    if (ms < 0) return net_lookup_now(name, out.data, out.len);
+    struct net_lookup *l = calloc(1, sizeof *l + (size_t)out.len);
+    if (!l) return -ENOMEM;
+    memcpy(l->name, name, sizeof name);
+    l->cap = out.len;
+    l->refs = 2;
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_mutex_init(&l->lock, NULL);
+    pthread_cond_init(&l->ended, &ca);
+    pthread_condattr_destroy(&ca);
+    struct timespec until;
+    clock_gettime(CLOCK_MONOTONIC, &until);
+    until.tv_sec += ms / 1000;
+    until.tv_nsec += (long)(ms % 1000) * 1000000;
+    if (until.tv_nsec >= 1000000000) {
+        until.tv_sec++;
+        until.tv_nsec -= 1000000000;
+    }
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    int started = pthread_create(&t, &attr, net_lookup_run, l) == 0;
+    pthread_attr_destroy(&attr);
+    pthread_mutex_lock(&l->lock);
+    if (!started) l->refs = 1;
+    while (started && !l->done) {
+        if (pthread_cond_timedwait(&l->ended, &l->lock, &until) == ETIMEDOUT) break;
+    }
+    int32_t r = l->done ? l->result : started ? -ETIMEDOUT : -EAGAIN;
+    if (r > 0) memcpy(out.data, l->out, (size_t)r * 16);
+    net_lookup_release(l);
+    return r;
 }
 
 /* How net_connect's connect on fd ended: 0 once connected, -EINPROGRESS
