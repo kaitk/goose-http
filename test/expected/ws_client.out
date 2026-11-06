@@ -1,0 +1,10 @@
+opening request has no permessage-deflate: true
+masked text: true
+reply: after
+pong: true
+masked binary: true
+joined message: true
+close: true
+bad accept: handshake
+refused: connect true, socket -1
+wsclient ok
