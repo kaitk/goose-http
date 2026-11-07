@@ -1,0 +1,20 @@
+opening request has no permessage-deflate: true
+masked text: true
+reply: after
+pong: true
+masked binary: true
+joined message: true
+16-bit length sent: true
+16-bit length received: true
+close: true
+bad accept: handshake
+server's close: close 1001
+close answered: true
+masked frame: frame
+fails with 1002: true
+refused: connect true, socket -1
+wss connect: 0
+wss echo: over tls
+wss 16-bit echo: true
+wss close: 0
+wsclient ok

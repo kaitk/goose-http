@@ -725,6 +725,36 @@ Rejected: a client in goose-rest, which uses nothing of goose-rest's and would l
 goose-acme with its own; and a package of its own, which adds a repository to every
 pin move of goose-tls and goose-http, for code that needs goose-http's parts.
 
+## A WebSocket client is an optional module on http.client's session
+
+Decided 2026-11-01; on a session since 2026-11-07.
+
+`http.wsclient` opens one WebSocket from a thread that runs no loop, the same place
+`http.client` runs. It opens the connection with `http.client`'s `open`, `put`, and
+`take`, on a copy of a `Session`'s settings, so a WebSocket has the same wait limit,
+deadline, `via`, and trusted certificates as an HTTP request, with no second TLS path
+to keep in step. After 101 the client writes masked frames and reads unmasked ones.
+It imports `http.websocket` for the opcodes, `ws_accept`, and `ws_utf8`, so a program
+that uses both sides learns one set of names.
+
+The opening request offers no extension. permessage-deflate stays out, as it does on
+the server.
+
+A caller connects, sends one text or binary frame, receives one whole message, and
+closes. A ping is answered with a pong inside the receive. Fragments of one message
+are joined before the caller sees them. A Close from the server is answered, and a
+frame that breaks the protocol is answered with a Close before the socket closes, as
+RFC 6455 §5.5.1 and §7.1.7 ask. A failure is an `http::Error`, and `call` names the
+step.
+
+The frame writer stays in this module: the server's writes unmasked frames into a
+`Reply`, and the client's writes masked ones to a socket.
+
+Rejected: driving the connection through the server's `WebSocket`, whose frames are
+unmasked; putting the client in `http.websocket`, which would make every server that
+uses WebSocket compile goose-tls; and permessage-deflate, which needs an extension
+this package still refuses.
+
 ## Every convenience is a composition of public parts
 
 Decided 2026-10-22, task 059.
