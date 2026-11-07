@@ -150,6 +150,14 @@ teardown (2026-10-28). IOCP's `ur_destroy` (`shim/iocp.c`) frees nothing, for th
 reason, so there every gathered send still queued at teardown, in flight or not, keeps
 its references (2026-10-30).
 
+### Parallel tests and a cold package cache
+
+`test/run_tests.py` builds its tests in parallel, and on a cold `~/.goose/build` several
+tests that import goose-tls configure and build its CMake directory at once. They fail
+with "The C compiler identification is unknown" or ranlib's "'libgoose_tls.a': No such
+file". Run the TLS tests once with `-j 1` to fill the cache; parallel runs pass after
+that. Seen in a fresh Ubuntu 26.04 x86-64 container (2026-11-07).
+
 ## Benchmarks
 
 - When V fails to compile the C it generated, it downloads a V release and retries with
@@ -210,6 +218,11 @@ its references (2026-10-30).
 - Passing an export's file list through xargs can produce several archives, and
   extraction stops after the first. Export as one archive
   ([development](development.md#docker-on-macos)).
+- In a `linux/amd64` container under emulation on Apple silicon, `scripts/goose.sh`
+  fails to extract the linux-x64 release: tar reports "Cannot open: Function not
+  implemented" for each file. Run `GOOSE_ASSET=linux-x64 scripts/goose.sh` on the Mac
+  to download and extract it into the tree, then set `GOOSE` to that build in the
+  container (2026-11-07).
 - Transparent huge pages can inflate RSS relative to WSL. Record their setting;
   disabling them with `prctl(PR_SET_THP_DISABLE)` gives measurements with 4 KB pages.
 - The VM can hide the CPU part number. `bench/build.sh` selects Zig's `apple_m1`

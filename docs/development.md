@@ -206,11 +206,12 @@ sudo apt-get install -y gcc clang libc6-dev liburing-dev git curl python3 \
 source, with `sudo apt-get install -y cmake ninja-build g++`.
 
 The TLS builds of the benchmark server, `examples/tls`, and `test/tls/` import
-goose-tls, which builds with CMake and OpenSSL 3's headers, and `scripts/test-http.sh`
-makes its test certificate with `openssl`:
+goose-tls, which builds with CMake, a C++ compiler for CMake's compiler check, and
+OpenSSL 3's headers, and `scripts/test-http.sh` makes its test certificate with
+`openssl`:
 
 ```sh
-sudo apt-get install -y cmake libssl-dev openssl
+sudo apt-get install -y cmake g++ libssl-dev openssl
 ```
 
 The benchmarks need more tools ([bench/README.md](../bench/README.md#toolchain)).
