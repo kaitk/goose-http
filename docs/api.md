@@ -825,10 +825,11 @@ request on the session's connection.
 ### A WebSocket client
 
 The module `http.wsclient` opens one WebSocket from a lane's thread, or from a program
-with no loop. It uses the blocking `connect`, `send_all`, and `recv`. A `wss` URL
-runs that socket through goose-tls, the same client TLS as
-[the HTTP client](#an-http-client). A program that imports the module declares
-goose-tls and goose-hash in its root file. Shown in `test/client/ws_client.goose`.
+with no loop. It opens the connection as [the HTTP client](#an-http-client) does, with
+a session's `ms`, `deadline`, `via`, and TLS context, so a `wss` URL trusts what the
+session trusts. The frames use `http.websocket`'s opcodes, `WS_TEXT` and `WS_BINARY`. A
+program that imports the module declares goose-tls and goose-hash in its root file.
+Shown in `test/client/ws_client.goose`.
 
 ```rust
 import http from "github.com/kaitk/goose-http@<tag>";
@@ -836,31 +837,36 @@ import tls from "github.com/kaitk/goose-tls@v0.0.6";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import http.wsclient;
 
-var conn, err = http::ws_client_connect("ws://127.0.0.1:8080/ws", 5000);
+var session = http::session();
+var conn, err = http::ws_client_connect(session, "wss://example.com/ws");
 guard err.code == 0 else { /* err.call names the step */ }
 http::ws_client_text(conn, "hello");
 let msg, err = http::ws_client_recv(conn);
 http::ws_client_close(conn);
+http::free(session);
 ```
 
 | Call | Does |
 |---|---|
-| `http::ws_client_connect(url, ms)` | Connects to a `ws://` or `wss://` URL and finishes the opening handshake. `ms` limits each wait, 30,000 by default, and -1 means none |
+| `http::ws_client_connect(s, url)` | Connects to a `ws://` or `wss://` URL with session `s`'s settings and finishes the opening handshake. The session keeps its TLS context, so free it after the WebSocket closes |
 | `http::ws_client_text(conn, data)` | Sends one masked text frame |
 | `http::ws_client_binary(conn, data)` | Sends one masked binary frame |
 | `http::ws_client_recv(conn)` | Returns the next whole text or binary message and an `http::Error`. A ping is answered with a masked pong and is not returned |
-| `http::ws_client_close(conn)` | Sends a Close with code 1000, waits until the peer ends the connection, and closes the socket |
+| `http::ws_client_close(conn)` | Sends a Close with code 1000, waits for the peer's Close or the end of the connection, and closes the socket |
 
-`WsMessage.op` is `WSC_TEXT` or `WSC_BINARY`. `WsMessage.data` is the payload. One
+`WsMessage.op` is `WS_TEXT` or `WS_BINARY`, and `WsMessage.data` is the payload. One
 send is one frame. A received message may arrive in several frames, and
 `ws_client_recv` joins them. `WsClient.limit`, 64 KiB by default, is the longest
-message. `WsClient.ms` is the wait limit.
+message. `conn.session` holds the connection's own copy of the settings: its `deadline`
+bounds every call on the WebSocket until the program changes it.
 
 The opening request has no extension field. It does not offer permessage-deflate.
 A frame with an RSV bit set fails the connection. A frame from the server must be
 unmasked. Text is checked as UTF-8.
 
-A failure is an `http::Error`. `call` names the step.
+A failure is an `http::Error`. `call` names the step. A `frame` or `text` failure
+first sends the server a Close with 1002, 1007, or 1009, and a Close from the server
+is answered with its code.
 
 | `call` | When |
 |---|---|

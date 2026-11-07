@@ -1,8 +1,9 @@
 // A WebSocket client for a thread that runs no loop, such as a lane's or a
-// command-line program's. It connects with the blocking socket, wraps that
-// socket in goose-tls when the URL is wss, writes the HTTP/1.1 opening
-// handshake, and then reads and writes masked frames (RFC 6455). It offers
-// no extension, so the opening request has no permessage-deflate. Only a
+// command-line program's. It opens its connection as http.client does, with
+// a Session's wait limit, deadline, via, and TLS context, then writes the
+// HTTP/1.1 opening handshake and reads and writes frames (RFC 6455) with
+// http.websocket's opcodes, accept value, and UTF-8 check. It offers no
+// extension, so the opening request has no permessage-deflate. Only a
 // program that imports this module needs goose-tls and goose-hash, which
 // its root file declares at the references this file names:
 //
@@ -11,12 +12,12 @@
 //   import hash from "github.com/kaitk/goose-hash@v0.0.4";
 //   import http.wsclient;
 //
-//   var conn, err = http::ws_client_connect("ws://127.0.0.1:8080/ws", 5000);
+//   var session = http::session();
+//   var conn, err = http::ws_client_connect(session, "wss://example.com/ws");
 //   http::ws_client_text(conn, "hello");
 //   let msg, err = http::ws_client_recv(conn);
 //   http::ws_client_close(conn);
-//
-// A program can import this module and http.websocket together.
+//   http::free(session);
 namespace http;
 
 import std;
@@ -28,32 +29,22 @@ import sys;
 import message;
 import socket;
 import client;
-
-// Opcodes a caller sees on WsMessage, and the control opcodes this file
-// answers itself. Not WS_TEXT and the rest: those belong to http.websocket.
-let WSC_CONTINUATION: u8 = 0;
-let WSC_TEXT: u8 = 1;
-let WSC_BINARY: u8 = 2;
-let WSC_CLOSE: u8 = 8;
-let WSC_PING: u8 = 9;
-let WSC_PONG: u8 = 10;
+import websocket;
 
 // Idle, then the handshake has finished, then a Close is sent, then the
 // socket is gone. One value, so a send cannot run after the close has started
 // and also pretend the handshake is still unfinished.
 enum WscLife { Idle, Open, Closing, Done }
 
-// One connection. scratch holds bytes read past the frame just taken, from
-// at. frag holds a message whose later fragments are still coming, and
-// frag_op is that message's opcode, or 0 when no fragment is open. frag is
-// the one growable field, so it stays last.
+// One connection. session holds its socket and TLS, and its own copy of the
+// settings of the Session it was opened with. scratch holds bytes read past
+// the frame just taken, from at. frag holds a message whose later fragments
+// are still coming, and frag_op is that message's opcode, or 0 when no
+// fragment is open. frag is the one growable field, so it stays last.
 struct WsClient {
-    ms: i64 = 30000,
+    session: Session = Session { .. },
     // The longest message, in one frame or several.
     limit: i64 = 1 << 16,
-    s: Socket = Socket { fd: -1 },
-    c: tls::Conn,
-    ctx: tls::Context,
     scratch: u8[..8192],
     at: i64 = 0,
     frag_op: u8 = 0,
@@ -69,11 +60,12 @@ struct WsMessage {
 
 fn wsc_error(call: const u8[:]) -> Error { Error { call: call, code: EINVAL } }
 
-// Opens url, ws:// or wss://, and finishes the opening handshake. ms limits
-// each wait, 30,000 by default, and -1 means none. An Error whose call is
-// "url", "resolve", "connect", "send", "recv", "tls", or "handshake".
-fn ws_client_connect(url: const u8[:], ms: i64 = 30000) -> WsClient, Error {
-    var w = WsClient { ms: ms, .. };
+// Opens url, ws:// or wss://, and finishes the opening handshake, with s's
+// ms, deadline, via, and TLS context, which stays s's to free. An Error
+// whose call is "url", "resolve", "connect", "send", "recv", "tls", or
+// "handshake".
+fn ws_client_connect(s: const Session&, url: const u8[:]) -> WsClient, Error {
+    var w = WsClient { session: Session { ms: s.ms, deadline: s.deadline, via: s.via, ctx: s.ctx, .. }, .. };
     // parse_url's slices point at rewritten, which stays live through the
     // handshake. tls::connect reads the host during that handshake.
     var rewritten: u8[>..] = [];
@@ -88,23 +80,10 @@ fn ws_client_connect(url: const u8[:], ms: i64 = 30000) -> WsClient, Error {
     }
     let u, ok = parse_url(rewritten);
     guard ok else { return w, wsc_error("url"); }
-
-    let sock, e = connect(u.host, u.port, ms);
-    guard e.code == 0 else { return w, e; }
-    w.s = sock;
-    if u.secure {
-        let ctx, made = tls::client(["http/1.1"]);
-        guard made else {
-            wsc_hangup(w);
-            return w, wsc_error("tls");
-        }
-        w.ctx = ctx;
-        w.c = tls::connect(w.ctx, u.host);
-        let h = wsc_tls_handshake(w);
-        guard h.code == 0 else {
-            wsc_hangup(w);
-            return w, h;
-        }
+    let opened = open(w.session, u);
+    guard opened.code == 0 else {
+        wsc_hangup(w);
+        return w, opened;
     }
 
     let key = wsc_key();
@@ -116,7 +95,7 @@ fn ws_client_connect(url: const u8[:], ms: i64 = 30000) -> WsClient, Error {
     req.append("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ");
     req.append(key);
     req.append("\r\nSec-WebSocket-Version: 13\r\n\r\n");
-    let sent = wsc_put(w, req);
+    let sent = put(w.session, req);
     guard sent.code == 0 else {
         wsc_hangup(w);
         return w, sent;
@@ -135,81 +114,78 @@ fn ws_client_connect(url: const u8[:], ms: i64 = 30000) -> WsClient, Error {
 fn ws_client_text(w: WsClient&, data: const u8[:]) -> Error {
     guard w.phase == WscLife.Open else { return wsc_error("send"); }
     var state: u32 = 0;
-    guard wsc_utf8(data, state) && state == 0 else { return wsc_error("text"); }
-    return wsc_send_frame(w, WSC_TEXT, data);
+    guard ws_utf8(data, state) && state == 0 else { return wsc_error("text"); }
+    return wsc_send_frame(w, WS_TEXT, data);
 }
 
 // Sends data in one masked binary frame. call "send" or "frame".
 fn ws_client_binary(w: WsClient&, data: const u8[:]) -> Error {
     guard w.phase == WscLife.Open else { return wsc_error("send"); }
-    return wsc_send_frame(w, WSC_BINARY, data);
+    return wsc_send_frame(w, WS_BINARY, data);
 }
 
 // The next whole text or binary message. A ping is answered with a masked
-// pong and is not returned. Fragments are joined. call "recv", "frame",
-// "text", or "close" when the peer sends a Close, and then code is the
-// close code, or 1006 when the socket ends with no Close.
+// pong and is not returned. Fragments are joined. call "recv", "frame", or
+// "text", after a Close with 1002, 1009, or 1007 (§7.1.7); or "close" when
+// the peer sends a Close, which is answered with its code, and then code is
+// that close code, or 1006 when the socket ends with no Close.
 fn ws_client_recv(w: WsClient&) -> WsMessage, Error {
     guard w.phase == WscLife.Open else { return WsMessage { .. }, wsc_error("recv"); }
     loop {
         var payload: u8[>..] = [];
         let fin, op, e = wsc_one_frame(w, payload);
-        guard e.code == 0 else { return wsc_peer_end(w, e); }
-        if op == WSC_PING {
-            let p = wsc_send_frame(w, WSC_PONG, payload);
-            guard p.code == 0 else { return wsc_dead(w, p); }
+        guard e.code == 0 else { return WsMessage { .. }, wsc_lost(w, e); }
+        if op == WS_PING {
+            let p = wsc_send_frame(w, WS_PONG, payload);
+            guard p.code == 0 else { return WsMessage { .. }, wsc_drop(w, p); }
             continue;
         }
-        if op == WSC_PONG { continue; }
-        if op == WSC_CLOSE {
-            let code = wsc_close_code(payload);
+        if op == WS_PONG { continue; }
+        if op == WS_CLOSE {
+            guard payload.len != 1 else { return WsMessage { .. }, wsc_fail(w, "frame", WS_PROTOCOL_ERROR); }
+            let code = if payload.len == 0 { 1005 } else { (payload[0] as i64) << 8 | payload[1] };
+            // The peer may have gone already, so a failed answer isn't reported.
+            wsc_send_frame(w, WS_CLOSE, payload[..min(payload.len, 2)]);
             wsc_hangup(w);
             return WsMessage { .. }, Error { call: "close", code: code };
         }
-        if op == WSC_CONTINUATION {
-            guard w.frag_op != 0 else { return wsc_dead(w, wsc_error("frame")); }
+        if op == WS_CONTINUATION {
+            guard w.frag_op != 0 else { return WsMessage { .. }, wsc_fail(w, "frame", WS_PROTOCOL_ERROR); }
         } else {
-            guard w.frag_op == 0 else { return wsc_dead(w, wsc_error("frame")); }
+            guard w.frag_op == 0 else { return WsMessage { .. }, wsc_fail(w, "frame", WS_PROTOCOL_ERROR); }
             w.frag_op = op;
             w.utf8 = 0;
         }
-        if w.frag_op == WSC_TEXT {
-            guard wsc_utf8(payload, w.utf8) else { return wsc_dead(w, wsc_error("text")); }
+        if w.frag_op == WS_TEXT {
+            guard ws_utf8(payload, w.utf8) else { return WsMessage { .. }, wsc_fail(w, "text", WS_INVALID_DATA); }
         }
-        guard w.frag.len + payload.len <= w.limit else { return wsc_dead(w, wsc_error("frame")); }
-        var msg = WsMessage { .. };
-        if fin && w.frag.len == 0 {
-            guard w.frag_op != WSC_TEXT || w.utf8 == 0 else { return wsc_dead(w, wsc_error("text")); }
-            msg.op = w.frag_op;
-            msg.data.append(payload);
-            w.frag_op = 0;
-            w.utf8 = 0;
-            return msg, no_error();
+        guard w.frag.len + payload.len <= w.limit else { return WsMessage { .. }, wsc_fail(w, "frame", WS_TOO_BIG); }
+        guard fin else {
+            w.frag.append(payload);
+            continue;
         }
-        w.frag.append(payload);
-        if fin {
-            guard w.frag_op != WSC_TEXT || w.utf8 == 0 else { return wsc_dead(w, wsc_error("text")); }
-            msg.op = w.frag_op;
-            msg.data.append(w.frag);
-            w.frag.clear();
-            w.frag_op = 0;
-            w.utf8 = 0;
-            return msg, no_error();
-        }
+        guard w.frag_op != WS_TEXT || w.utf8 == 0 else { return WsMessage { .. }, wsc_fail(w, "text", WS_INVALID_DATA); }
+        var msg = WsMessage { op: w.frag_op, .. };
+        msg.data.append(w.frag);
+        msg.data.append(payload);
+        w.frag.clear();
+        w.frag_op = 0;
+        w.utf8 = 0;
+        return msg, no_error();
     }
 }
 
-// Sends a Close with code 1000, reads until the peer ends the connection,
-// and closes the socket. A second call does nothing. call "send" or "recv"
-// when that wait fails. A peer that has already gone is code 0.
+// Sends a Close with code 1000, reads until the peer answers it or ends the
+// connection, and closes the socket. A second call does nothing. call
+// "send" or "recv" when that wait fails. A peer that has already gone is
+// code 0.
 fn ws_client_close(w: WsClient&) -> Error {
     guard w.phase == WscLife.Open else {
         if w.phase != WscLife.Done { wsc_hangup(w); }
         return no_error();
     }
-    // 1000 is normal closure, two big-endian bytes.
-    var body: u8[2] = [3, 232];
-    let sent = wsc_send_frame(w, WSC_CLOSE, body);
+    var body: u8[2] = [(WS_NORMAL >> 8) as! u8, WS_NORMAL as! u8];
+    let sent = wsc_send_frame(w, WS_CLOSE, body);
     guard sent.code == 0 else { return wsc_drop(w, sent); }
     w.phase = WscLife.Closing;
     for i in 64 {
@@ -222,42 +198,40 @@ fn ws_client_close(w: WsClient&) -> Error {
             }
             return wsc_drop(w, e);
         }
-        if op == WSC_CLOSE {
+        if op == WS_CLOSE {
             wsc_hangup(w);
             return no_error();
         }
-        if op == WSC_PING {
-            let p = wsc_send_frame(w, WSC_PONG, payload);
+        // Data frames after the Close are discarded (RFC 6455 §5.5.1).
+        if op == WS_PING {
+            let p = wsc_send_frame(w, WS_PONG, payload);
             guard p.code == 0 else { return wsc_drop(w, p); }
         }
-        // After Close is sent, a data frame is discarded (RFC 6455 §5.5.1).
-        guard fin || op == WSC_PONG || op == WSC_PING else { return wsc_drop(w, wsc_error("frame")); }
     }
     return wsc_drop(w, wsc_error("close"));
 }
 
-fn wsc_dead(w: WsClient&, e: Error) -> WsMessage, Error {
+// Fails the connection (RFC 6455 §7.1.7): a Close with code, unless one was
+// sent already, and then the socket closes.
+fn wsc_fail(w: WsClient&, call: const u8[:], code: i32) -> Error {
+    if w.phase == WscLife.Open {
+        var body: u8[2] = [(code >> 8) as! u8, code as! u8];
+        wsc_send_frame(w, WS_CLOSE, body);
+    }
     wsc_hangup(w);
-    return WsMessage { .. }, e;
+    return wsc_error(call);
 }
 
-fn wsc_peer_end(w: WsClient&, e: Error) -> WsMessage, Error {
-    if e.call == "recv" && e.code == ECONNRESET {
-        wsc_hangup(w);
-        return WsMessage { .. }, Error { call: "close", code: 1006 };
-    }
-    return wsc_dead(w, e);
+// A socket that ended is the peer's close with no Close frame, 1006.
+fn wsc_lost(w: WsClient&, e: Error) -> Error {
+    wsc_hangup(w);
+    if e.call == "recv" && e.code == ECONNRESET { return Error { call: "close", code: 1006 }; }
+    return e;
 }
 
 fn wsc_drop(w: WsClient&, e: Error) -> Error {
     wsc_hangup(w);
     return e;
-}
-
-fn wsc_close_code(payload: const u8[:]) -> i64 {
-    if payload.len >= 2 { return (payload[0] as i64) << 8 | payload[1]; }
-    if payload.len == 0 { return 1005; }
-    return 1002;
 }
 
 // 16 random bytes, base64, the opening key (RFC 6455 §4.1).
@@ -275,18 +249,6 @@ fn wsc_key() -> u8[..24] {
     var key: u8[..24] = [];
     key.append(text[..min(text.len, 24)]);
     return key;
-}
-
-// Sec-WebSocket-Accept for key: base64 of SHA-1 of the key and the GUID.
-fn wsc_accept(key: const u8[:]) -> u8[..28] {
-    var joined: u8[..64] = [];
-    joined.append(key[..min(key.len, 28)]);
-    joined.append("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    var text: u8[>..] = [];
-    base64::encode(text, hash::sha1(joined));
-    var accept: u8[..28] = [];
-    accept.append(text);
-    return accept;
 }
 
 fn wsc_token(value: const u8[:], want: const u8[:]) -> bool {
@@ -313,7 +275,7 @@ fn wsc_read_101(w: WsClient&, key: const u8[:]) -> Error {
             return err;
         }
         guard raw.len <= 8192 else { return wsc_error("handshake"); }
-        let n, e = wsc_take(w, tmp);
+        let n, e = take(w.session, tmp);
         guard e.code == 0 else { return e; }
         guard n > 0 else { return Error { call: "recv", code: ECONNRESET }; }
         raw.append(tmp[..n]);
@@ -324,7 +286,8 @@ fn wsc_check_101(raw: const u8[:], key: const u8[:]) -> Error {
     let eol = line_end(raw, 0);
     guard eol > 0 else { return wsc_error("handshake"); }
     let status = raw[..eol - 2];
-    guard starts_with(status, "HTTP/1.") && status.len >= 12 && status[8] == ' ' else {
+    guard starts_with(status, "HTTP/1.") && status.len >= 12 && status[8] == ' '
+        && (status.len == 12 || status[12] == ' ') else {
         return wsc_error("handshake");
     }
     let code, ok = parse_int(status[9..12]);
@@ -339,14 +302,14 @@ fn wsc_check_101(raw: const u8[:], key: const u8[:]) -> Error {
     guard has_up && wsc_token(upgrade, "websocket") else { return wsc_error("handshake"); }
     guard has_conn && wsc_token(connection, "upgrade") else { return wsc_error("handshake"); }
     guard !has_ext else { return wsc_error("handshake"); }
-    let want = wsc_accept(key);
+    let want = ws_accept(key);
     guard has_accept && accept == want[..] else { return wsc_error("handshake"); }
     return no_error();
 }
 
 fn wsc_send_frame(w: WsClient&, op: u8, data: const u8[:]) -> Error {
     guard w.phase == WscLife.Open || w.phase == WscLife.Closing else { return wsc_error("send"); }
-    guard op >= WSC_CLOSE || data.len <= w.limit else { return wsc_error("frame"); }
+    guard op >= WS_CLOSE || data.len <= w.limit else { return wsc_error("frame"); }
     var mask: u8[4] = [0; 4];
     var r = rng { random_seed() };
     let bits = rand_u64(r);
@@ -366,7 +329,7 @@ fn wsc_send_frame(w: WsClient&, op: u8, data: const u8[:]) -> Error {
     }
     frame.append(mask);
     for i in n { frame.push(data[i] ^ mask[i & 3]); }
-    return wsc_put(w, frame);
+    return put(w.session, frame);
 }
 
 // One frame from the server. A masked frame fails the connection. An RSV
@@ -377,7 +340,7 @@ fn wsc_one_frame(w: WsClient&, payload: u8[>..]&) -> bool, u8, Error {
     guard e.code == 0 else { return false, 0, e; }
     let b0 = w.scratch[w.at];
     let b1 = w.scratch[w.at + 1];
-    if b0 & 0x70 != 0 || b1 & 0x80 != 0 { return false, 0, wsc_error("frame"); }
+    if b0 & 0x70 != 0 || b1 & 0x80 != 0 { return false, 0, wsc_fail(w, "frame", WS_PROTOCOL_ERROR); }
     let fin = b0 & 0x80 != 0;
     let op = b0 & 0x0F;
     var n = (b1 & 0x7F) as i64;
@@ -389,17 +352,17 @@ fn wsc_one_frame(w: WsClient&, payload: u8[>..]&) -> bool, u8, Error {
     if h == 4 {
         n = (w.scratch[w.at + 2] as i64) << 8 | w.scratch[w.at + 3];
     } else if h == 10 {
-        if w.scratch[w.at + 2] & 0x80 != 0 { return false, 0, wsc_error("frame"); }
+        if w.scratch[w.at + 2] & 0x80 != 0 { return false, 0, wsc_fail(w, "frame", WS_PROTOCOL_ERROR); }
         n = 0;
         for i in 8 { n = n << 8 | w.scratch[w.at + 2 + i]; }
     }
-    let control = op >= WSC_CLOSE;
+    let control = op >= WS_CLOSE;
     if control {
-        if op > WSC_PONG || !fin || n > 125 { return false, 0, wsc_error("frame"); }
-    } else if op > WSC_BINARY {
-        return false, 0, wsc_error("frame");
+        if op > WS_PONG || !fin || n > 125 { return false, 0, wsc_fail(w, "frame", WS_PROTOCOL_ERROR); }
+    } else if op > WS_BINARY {
+        return false, 0, wsc_fail(w, "frame", WS_PROTOCOL_ERROR);
     }
-    if !control && n > w.limit { return false, 0, wsc_error("frame"); }
+    if !control && n > w.limit { return false, 0, wsc_fail(w, "frame", WS_TOO_BIG); }
     w.at += h;
     let e3 = wsc_copy_out(w, n, payload);
     guard e3.code == 0 else { return false, 0, e3; }
@@ -421,7 +384,7 @@ fn wsc_need(w: WsClient&, n: i64) -> Error {
         guard w.scratch.len < 8192 else { return wsc_error("frame"); }
         var tmp: u8[1024] = [0; 1024];
         let room = min(1024, 8192 - w.scratch.len);
-        let got, e = wsc_take(w, tmp[..room]);
+        let got, e = take(w.session, tmp[..room]);
         guard e.code == 0 else { return e; }
         guard got > 0 else { return Error { call: "recv", code: ECONNRESET }; }
         w.scratch.append(tmp[..got]);
@@ -434,10 +397,10 @@ fn wsc_copy_out(w: WsClient&, n: i64, dest: u8[>..]&) -> Error {
     while left > 0 {
         let e = wsc_need(w, min(left, 1024));
         guard e.code == 0 else { return e; }
-        let take = min(left, w.scratch.len - w.at);
-        dest.append(w.scratch[w.at..w.at + take]);
-        w.at += take;
-        left -= take;
+        let part = min(left, w.scratch.len - w.at);
+        dest.append(w.scratch[w.at..w.at + part]);
+        w.at += part;
+        left -= part;
     }
     if w.at == w.scratch.len {
         w.scratch.clear();
@@ -446,105 +409,14 @@ fn wsc_copy_out(w: WsClient&, n: i64, dest: u8[>..]&) -> Error {
     return no_error();
 }
 
-fn wsc_tls_handshake(w: WsClient&) -> Error {
-    guard tls::ok(w.c) else { return wsc_error("tls"); }
-    var wire: u8[16384] = [0; 16384];
-    loop {
-        let r = tls::handshake(w.c);
-        let e = wsc_flush(w);
-        guard e.code == 0 else { return e; }
-        if r == 0 { return no_error(); }
-        guard r == tls::WANT_INPUT else { return wsc_error("tls"); }
-        let n = recv(w.s, wire, w.ms);
-        guard n > 0 else { return Error { call: "recv", code: if n == 0 { ECONNRESET } else { -n } }; }
-        guard tls::feed(w.c, wire[..n]) == n else { return wsc_error("tls"); }
-    }
-}
-
-fn wsc_flush(w: WsClient&) -> Error {
-    var buf: u8[16384] = [0; 16384];
-    loop {
-        let n = tls::drain(w.c, buf);
-        guard n > 0 else { return no_error(); }
-        let e = send_all(w.s, buf[..n], w.ms);
-        guard e.code == 0 else { return e; }
-    }
-}
-
-fn wsc_put(w: WsClient&, bytes: const u8[:]) -> Error {
-    guard tls::ok(w.c) else { return send_all(w.s, bytes, w.ms); }
-    guard tls::write(w.c, bytes) == bytes.len else { return wsc_error("tls"); }
-    return wsc_flush(w);
-}
-
-fn wsc_take(w: WsClient&, buf: u8[:]) -> i64, Error {
-    guard tls::ok(w.c) else {
-        let n = recv(w.s, buf, w.ms);
-        if n > 0 { return n, no_error(); }
-        if n == 0 { return 0, no_error(); }
-        return 0, Error { call: "recv", code: -n };
-    }
-    var wire: u8[16384] = [0; 16384];
-    loop {
-        let n = tls::read(w.c, buf);
-        if n > 0 { return n, no_error(); }
-        if n == tls::CLOSED { return 0, no_error(); }
-        guard n == tls::WANT_INPUT else { return 0, wsc_error("tls"); }
-        let m = recv(w.s, wire, w.ms);
-        guard m > 0 else { return 0, Error { call: "recv", code: if m == 0 { ECONNRESET } else { -m } }; }
-        guard tls::feed(w.c, wire[..m]) == m else { return 0, wsc_error("tls"); }
-    }
-}
-
+// Closes the socket and its TLS connection. The TLS context stays the
+// Session's.
 fn wsc_hangup(w: WsClient&) {
-    if tls::ok(w.c) {
-        tls::free(w.c);
-        w.c = tls::Conn { .. };
-    }
-    if tls::ok(w.ctx) {
-        tls::free(w.ctx);
-        w.ctx = tls::Context { .. };
-    }
-    hangup(w.s);
+    hangup(w.session);
     w.scratch.clear();
     w.at = 0;
     w.frag.clear();
     w.frag_op = 0;
     w.utf8 = 0;
     w.phase = WscLife.Done;
-}
-
-// Whether s goes on as UTF-8 that state leaves to check. state packs the
-// continuation bytes still due and the range the next byte must fall in,
-// the same rules RFC 3629 §4 gives the server module.
-fn wsc_utf8(s: const u8[:], state: u32&) -> bool {
-    var need = state >> 16;
-    var lo = (state >> 8) & 0xFF;
-    var hi = state & 0xFF;
-    for b in s {
-        if need == 0 {
-            if b < 0x80 { continue; }
-            lo = 0x80;
-            hi = 0xBF;
-            if b >= 0xC2 && b <= 0xDF { need = 1; }
-            else if b >= 0xE0 && b <= 0xEF {
-                need = 2;
-                if b == 0xE0 { lo = 0xA0; }
-                if b == 0xED { hi = 0x9F; }
-            } else if b >= 0xF0 && b <= 0xF4 {
-                need = 3;
-                if b == 0xF0 { lo = 0x90; }
-                if b == 0xF4 { hi = 0x8F; }
-            } else {
-                return false;
-            }
-        } else {
-            guard b >= lo && b <= hi else { return false; }
-            need--;
-            lo = 0x80;
-            hi = 0xBF;
-        }
-    }
-    state = if need == 0 { 0 } else { need << 16 | lo << 8 | hi };
-    return true;
 }

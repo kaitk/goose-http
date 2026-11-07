@@ -241,8 +241,8 @@ def find_tests(names):
     # test/tls/'s programs, client/client, client/ws_client, and those that
     # import http.h3 build goose-tls, which builds with OpenSSL, not yet set
     # up on Windows (docs/development.md, "OpenSSL"). outbound_loop,
-    # timeout_tag, and client/client listen on Unix sockets and serve on
-    # serve_epoll, which Windows lacks.
+    # timeout_tag, client/client, and client/ws_client listen on Unix sockets
+    # and serve on serve_epoll, which Windows lacks.
     if WINDOWS:
         skip = {"outbound_loop", "timeout_tag", "client", "ws_client"}
         tests = [t for t in tests if t.parent.name != "tls" and t.stem not in skip
