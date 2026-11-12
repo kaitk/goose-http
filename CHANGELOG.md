@@ -2,6 +2,23 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.19 (2026-11-12)
+
+Fewer wakes and more connections a worker on io_uring, and a WebSocket client. Goose
+`v2026.3`, goose-hash `v0.0.4`, goose-tls `v0.0.6`, and goose-compress `v0.1.4`. No
+breaking changes.
+
+Added:
+
+- `Config.ring_batch_us`: an io_uring wait that would block holds for more completions,
+  up to this long, so a busy worker wakes once for many. 0 by default
+  ([decision](docs/decisions.md#a-wait-may-hold-for-more-completions-behind-configring_batch_us)).
+- `Config.ring_direct`: io_uring connections as direct descriptors, past
+  `RLIMIT_NOFILE`, in up to 16 rings a worker. Off by default
+  ([decision](docs/decisions.md#direct-descriptors-and-rings-past-the-first-behind-configring_direct)).
+- A blocking WebSocket client on `http.client`'s session
+  ([the client](docs/api.md#a-websocket-client)).
+
 ## v0.5.18 (2026-11-04)
 
 A deadline for client requests. Goose `v2026.3`, goose-hash `v0.0.4`, goose-tls

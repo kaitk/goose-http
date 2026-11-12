@@ -1020,6 +1020,14 @@ other isn't in the binary.
   doesn't run on epoll unnoticed. On macOS it always fails (`ENOSYS`); on Windows the
   completion port is the platform's own.
 - `http::serve_epoll` is faster on macOS, and on Linux uses a quarter of the memory.
+- `Config.ring_batch_us`, on io_uring: a wait that would block holds up to this many
+  microseconds for more completions, up to a pass's 256, never past the next timer. A
+  busy worker then wakes once for many, at up to this much added latency when load is
+  light. 0, the default, answers the first completion at once.
+- `Config.ring_direct`, on io_uring: connections are direct descriptors, slots in the
+  ring's file table, so a worker holds more connections than `RLIMIT_NOFILE`, adding
+  rings as tables fill, up to 16. A connection's fd in `Reply.fd` then isn't one for
+  system calls; `http::peer` works. The emulated ring ignores it.
 
 The benchmark server links both. `LOOP` picks: `uring` (`iocp` on Windows), `epoll`,
 or `uring-epoll`. See
