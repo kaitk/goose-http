@@ -158,6 +158,14 @@ with "The C compiler identification is unknown" or ranlib's "'libgoose_tls.a': N
 file". Run the TLS tests once with `-j 1` to fill the cache; parallel runs pass after
 that. Seen in a fresh Ubuntu 26.04 x86-64 container (2026-11-07).
 
+### The ALPN refusal check on Ubuntu 24.04
+
+`scripts/test-http.sh`'s TLS checks offer ALPN `spdy/3` and expect the
+no_application_protocol alert. With Ubuntu 24.04's Python and OpenSSL 3.0.13, the client
+reports the alert as `[SSL] unknown error`, so the check fails and `scripts/test.sh`
+stops there. The same tree passes in Ubuntu 26.04, so test in a 26.04 image
+(arm64 Docker on macOS, 2026-11-12).
+
 ## Benchmarks
 
 - When V fails to compile the C it generated, it downloads a V release and retries with
