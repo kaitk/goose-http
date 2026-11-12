@@ -88,5 +88,7 @@ extern "ur_disarm" fn ring_disarm(r: i64, key: u64, mask: u64);
 // requests later (shim/iocp.c).
 extern "ur_destroy" fn ring_destroy(r: i64);
 // Submits what's queued, waits up to timeout_ms (-1: no limit) for a
-// completion, and writes up to out.len completions into out.
-extern "ur_wait" fn ring_wait(r: i64, out: Completion[:], timeout_ms: i32) -> i32;
+// completion, and writes up to out.len completions into out. On io_uring,
+// batch_us above 0 first waits up to that long, within timeout_ms, for
+// out.len completions (Config.ring_batch_us).
+extern "ur_wait" fn ring_wait(r: i64, out: Completion[:], timeout_ms: i32, batch_us: i32) -> i32;

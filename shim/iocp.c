@@ -887,8 +887,10 @@ static int ur_finish(struct ur *u, struct ur_req *q, int from_port, ur_completio
 /* Waits up to timeout_ms (-1: no limit) for completions, and writes up to
    out.len of them into out. Requests that failed when posted come first.
    Each completion the port gives makes at most one in out, and some make
-   none: a short send posted again, or a receive that found no data. */
-int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms) {
+   none: a short send posted again, or a receive that found no data.
+   batch_us is io_uring's; the port gives what it has. */
+int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch_us) {
+    (void)batch_us;
     struct ur *u = (struct ur *)(intptr_t)h;
     if (u->err) return u->err;
     int32_t n = 0;

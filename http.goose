@@ -133,6 +133,12 @@ struct Config {
     ring_entries: i32 = 4096,
     ring_buffers: i32 = 64,
     ring_buffer_size: i32 = 4096,
+    // On io_uring, how long in microseconds a wait that would block holds
+    // for more completions, up to a pass's 256, before the loop answers
+    // those it has: one wake for many under load, for up to this much
+    // latency. It never holds past the next timer. 0, the default, answers
+    // the first completion at once.
+    ring_batch_us: i32 = 0,
     // On Linux, serve's ring is the emulation over epoll it falls back to
     // where io_uring_setup fails, as in Docker's default seccomp profile: for
     // testing that fallback.

@@ -617,8 +617,10 @@ static void rp_work(struct rp *u, rp_completions out, int32_t *n) {
    limit) only if that made no completion, and writes up to out.len
    completions into out. Events are collected on every call: a few busy
    connections that always make completions would otherwise keep the ones
-   waiting for an edge from ever seeing it. */
-int32_t RP(wait)(int64_t h, rp_completions out, int32_t timeout_ms) {
+   waiting for an edge from ever seeing it. batch_us is io_uring's; the
+   emulation takes what epoll has. */
+int32_t RP(wait)(int64_t h, rp_completions out, int32_t timeout_ms, int32_t batch_us) {
+    (void)batch_us;
     struct rp *u = (struct rp *)(intptr_t)h;
     if (u->err) return u->err;
     int32_t n = 0;

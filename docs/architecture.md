@@ -133,6 +133,11 @@ the loop copies receives out of provided buffers. A send of at least 64 KB with
 nothing queued on its socket first tries a synchronous `send(2)`, so only unsent bytes
 need a copy.
 
+A wait wakes for the first completion. With `Config.ring_batch_us`, a wait that would
+block holds for up to a pass's 256 completions, at most that long and never past the
+next timer, so a busy worker wakes once for many
+([decisions](decisions.md#a-wait-may-hold-for-more-completions-behind-configring_batch_us)).
+
 A connection has one send in flight, and later sends queue behind it, which keeps
 order and batches pipelined responses. Past `Config.max_queued` bytes queued, the loop
 stops receiving until the client reads. A completion carries the connection's slot

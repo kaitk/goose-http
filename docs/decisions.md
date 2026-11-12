@@ -1333,6 +1333,29 @@ Rejected: waking through `mail_send` to one's own box, which needs a slot per wa
 and delivering wakes only at the end of a pass, which left them behind every other
 event in it.
 
+## A wait may hold for more completions, behind `Config.ring_batch_us`
+
+Decided 2026-11-12, for Plod's $12 Server Challenge entry (Plod's task 063).
+
+With `ring_batch_us` above 0, an io_uring wait that would block first waits for a
+pass's 256 completions, up to `ring_batch_us` and never past the timeout the loop
+passes, which ends at the next timer. Only if that brings none does it wait for the
+first as before, so an idle worker pays two enters a wake. The default, 0, keeps one
+wake per completion. The emulated ring and IOCP ignore it.
+
+Why: at a few thousand requests a second over thousands of connections, each
+request woke the worker on its own. The entry on one process, Docker's arm64 VM on
+an M1 Pro (Linux 7.0), 1 CPU, 4,000 k6 users at the challenge's think times divided
+by 20, about 6,500 requests a second: at 1,000 µs, `io_uring_enter` calls fell from
+1.14 to 0.11 a request and context switches from 0.38 to 0.11 (`perf stat`, 20 s).
+CPU a request fell in each of three alternating rounds, by 3.4, 2.9, and 7.4 µs
+(31.6 against 35.0 µs at best). A request waits up to `ring_batch_us` longer at low
+load, so it stays off by default.
+
+Rejected: Linux 6.12's minimum wait (`IORING_ENTER_EXT_ARG` with `min_wait_usec`),
+which does it in one enter, but the kernels goose-http serves include 6.8; and a count
+of completions to wait for beside the time, which the pass's size already sets.
+
 ## Not yet decided
 
 ### Compression in an optional module

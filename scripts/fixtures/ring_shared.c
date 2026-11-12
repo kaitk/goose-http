@@ -26,7 +26,7 @@ typedef struct { completion *data; int64_t len; } completions;
 int64_t ur_create(int32_t entries, int32_t nbufs, int32_t buflen, int32_t flags);
 int32_t ur_probe(void);
 int32_t ur_send_shared(int64_t h, int32_t fd, uint64_t tag, bytes data);
-int32_t ur_wait(int64_t h, completions out, int32_t timeout_ms);
+int32_t ur_wait(int64_t h, completions out, int32_t timeout_ms, int32_t batch_us);
 void ur_close(int64_t h, int32_t fd, uint64_t recv);
 void ur_destroy(int64_t h);
 int64_t shared_put(bytes data, int64_t refs);
@@ -84,7 +84,7 @@ static void run(int64_t h, const char *name) {
     while (!done || n < N + 2) {
         assert(ms() < deadline);
         completion c[4];
-        int32_t k = ur_wait(h, (completions){ c, 4 }, 1);
+        int32_t k = ur_wait(h, (completions){ c, 4 }, 1, 0);
         for (int32_t i = 0; i < k; i++) {
             assert(c[i].tag == 7 && c[i].send && !done);
             assert(c[i].res == N + 2);
@@ -106,12 +106,12 @@ static void run(int64_t h, const char *name) {
     shared_gather(0, w);
     assert(refs(b) == 3);
     completion c[4];
-    assert(ur_wait(h, (completions){ c, 4 }, 50) == 0);
+    assert(ur_wait(h, (completions){ c, 4 }, 50, 0) == 0);
     ur_close(h, sv[0], 0);
     deadline = ms() + 5000;
     while (refs(b) > 1) {
         assert(ms() < deadline);
-        int32_t k = ur_wait(h, (completions){ c, 4 }, 10);
+        int32_t k = ur_wait(h, (completions){ c, 4 }, 10, 0);
         for (int32_t i = 0; i < k; i++) assert(c[i].tag == 8 && c[i].send);
     }
     assert(shared_release(b) == 0);

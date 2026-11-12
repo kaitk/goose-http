@@ -26,7 +26,7 @@ static void *test_realloc(void *p, size_t n) {
 /* Waits for one completion, tag's send, and returns its result. */
 static int32_t complete(int64_t h, uint64_t tag) {
     ur_completion c[4];
-    int32_t n = ur_wait(h, (ur_completions){c, 4}, 1000);
+    int32_t n = ur_wait(h, (ur_completions){c, 4}, 1000, 0);
     assert(n == 1 && c[0].tag == tag && c[0].send && !c[0].more && c[0].buf == -1);
     return c[0].res;
 }
@@ -66,12 +66,12 @@ int main(void) {
     assert(ur_send(h, sv[0], 2, (ur_bytes){data, sizeof data}) == -ENOMEM);
     assert(!fail_realloc && drain(sv[1]) == 0);
     ur_completion c;
-    assert(ur_wait(h, (ur_completions){&c, 1}, 0) == 0);
+    assert(ur_wait(h, (ur_completions){&c, 1}, 0, 0) == 0);
 
     assert(ur_send(h, sv[0], 3, (ur_bytes){data, sizeof data}) == 0);
     assert(drain(sv[1]) == (int64_t)sizeof data);
     assert(complete(h, 3) == (int32_t)sizeof data);
-    assert(ur_wait(h, (ur_completions){&c, 1}, 0) == 0);
+    assert(ur_wait(h, (ur_completions){&c, 1}, 0, 0) == 0);
 
     ur_destroy(h);
     puts("uring inline send reserves its completion before sending");

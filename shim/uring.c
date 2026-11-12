@@ -193,7 +193,7 @@ void urp_cancel(int64_t h, uint64_t tag);
 void urp_close(int64_t h, int32_t fd, uint64_t recv);
 void urp_take(int64_t h, int32_t buf, int64_t off, ur_bytes dst);
 void urp_give(int64_t h, int32_t buf);
-int32_t urp_wait(int64_t h, ur_completions out, int32_t timeout_ms);
+int32_t urp_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch_us);
 void urp_destroy(int64_t h);
 int64_t urp_waker(int64_t h, uint64_t tag);
 int32_t urp_listeners(void);
@@ -788,9 +788,13 @@ void ur_give(int64_t h, int32_t buf) {
 
 /* Submits what's queued, waits up to timeout_ms (-1: no limit) for at least
    one completion, and writes up to out.len of them into out. Leaves any
-   others for the next call. */
-int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms) {
-    if (UR_EMULATED(h)) return urp_wait(UR_POLL(h), out, timeout_ms);
+   others for the next call. With batch_us above 0, a wait that may block
+   first waits for out.len completions, up to batch_us and never past
+   timeout_ms, and only with none by then for the first as before: one wake
+   for many completions under load, two enters when idle. Linux 6.12's
+   min_wait does it in one, but the kernels this serves include 6.8. */
+int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch_us) {
+    if (UR_EMULATED(h)) return urp_wait(UR_POLL(h), out, timeout_ms, batch_us);
     struct ur *u = (struct ur *)(intptr_t)h;
     if (u->given) {
         io_uring_buf_ring_advance(u->br, u->given);
@@ -798,6 +802,19 @@ int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms) {
     }
     struct io_uring_cqe *cqe;
     int r;
+    long long left_us = timeout_ms < 0 ? -1 : (long long)timeout_ms * 1000;
+    if (u->nsent == 0 && batch_us > 0 && left_us != 0) {
+        long long us = left_us > 0 && left_us < batch_us ? left_us : batch_us;
+        struct __kernel_timespec ts = { us / 1000000, (us % 1000000) * 1000 };
+        r = io_uring_submit_and_wait_timeout(&u->ring, &cqe, (unsigned)out.len, &ts, NULL);
+        if (r < 0 && r != -ETIME) return r;
+        if (io_uring_cq_ready(&u->ring) > 0) goto take;
+        if (left_us > 0) {
+            left_us -= us;
+            timeout_ms = (int32_t)((left_us + 999) / 1000);
+            if (left_us == 0) goto take;
+        }
+    }
     if (u->nsent > 0) {
         r = io_uring_submit_and_get_events(&u->ring);
     } else if (timeout_ms < 0) {
@@ -807,6 +824,7 @@ int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms) {
         r = io_uring_submit_and_wait_timeout(&u->ring, &cqe, 1, &ts, NULL);
     }
     if (r < 0 && r != -ETIME) return r;
+take:;
     int32_t n = u->nsent < out.len ? u->nsent : (int32_t)out.len;
     memcpy(out.data, u->sent, (size_t)n * sizeof *u->sent);
     u->nsent -= n;

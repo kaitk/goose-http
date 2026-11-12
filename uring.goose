@@ -730,7 +730,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
             // mail and a stop.
             var timeout: i32 = if overdue.len > 0 || woken_n > 0 { 0 } else { wait_for(timers, now) };
             if h3_serves(tls) { timeout = h3_wait(tls, now, timeout); }
-            let n = ring_wait(r, done, timeout);
+            let n = ring_wait(r, done, timeout, cfg.ring_batch_us);
             if n == -EINTR { continue; }
             guard n >= 0 else { return Error { call: "wait", code: -n }; }
             now = net_clock_ms();
@@ -821,7 +821,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     close_listeners();
     // Submits the closes still queued, then frees the ring, and after it the
     // waker, which io_uring's poll of it holds until then.
-    ring_wait(r, done, 0);
+    ring_wait(r, done, 0, 0);
     ring_destroy(r);
     close_waiting(box, waker);
     return failed;
