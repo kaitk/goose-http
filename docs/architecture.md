@@ -142,8 +142,9 @@ With `Config.ring_direct`, connections are direct descriptors: slots in the ring
 table, outside the process's descriptor table, so a worker holds more connections than
 `RLIMIT_NOFILE`. When a table is full, the worker adds a ring, up to 16, which ring 0's
 wait collects. Accepts are single-shot, so each slot keeps its peer's address for
-`http::peer`, and a connection's fd in `Reply.fd` isn't one for system calls
-([decisions](decisions.md#direct-descriptors-and-rings-past-the-first-behind-configring_direct)).
+`http::peer`, and a connection's fd in `Reply.fd` isn't one for system calls. A
+connection's close waits for its shutdown in flight, which finds its slot only when it
+runs ([decisions](decisions.md#direct-descriptors-and-rings-past-the-first-behind-configring_direct)).
 
 A connection has one send in flight, and later sends queue behind it, which keeps
 order and batches pipelined responses. Past `Config.max_queued` bytes queued, the loop

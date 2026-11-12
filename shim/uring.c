@@ -77,9 +77,11 @@ _Static_assert(sizeof(ur_bytes) == sizeof(void *) + 8 && sizeof(ur_completion) =
 #define UR_QUIET 2
 #define UR_ARMED 3
 /* Under UR_ARMED, past any armed socket's index: a direct accept, with its
-   listener and record below, and ring 0's poll of the extra rings' eventfd. */
+   listener and record below, ring 0's poll of the extra rings' eventfd, and
+   a direct shutdown, with its fd's record below. */
 #define UR_ACCEPTED ((uint64_t)1 << 56)
 #define UR_XRINGS ((uint64_t)1 << 57)
+#define UR_SHUT ((uint64_t)1 << 58)
 
 /* A direct connection's fd, as Goose sees it. */
 #define UR_DIRECT_FD (1 << 30)
@@ -166,10 +168,17 @@ struct ur_pipe {
    this ring closed it. One send at a time keeps a connection's bytes in
    order. A send's rest, or the next send, goes out only while its fd's
    generation is the send's: once the ring closes fd, the next accept, on any
-   ring, may reuse the number. */
+   ring, may reuse the number.
+
+   A direct fd's shutdowns in flight hold its close back (shut, closing):
+   the kernel always runs a shutdown from io-wq, which finds a fixed file
+   by its slot only then, so a close and an accept before it would give it
+   the next connection in that slot. */
 struct ur_fd {
     struct ur_send *head, *last;
     uint32_t gen;
+    uint16_t shut;
+    uint16_t closing;
 };
 
 /* A direct slot's peer, as net_peer gives it: the address IPv6 or
@@ -864,6 +873,7 @@ void ur_cancel(int64_t h, uint64_t tag) {
    holds a reference to the socket, so closing fd alone would leave the
    connection open until the request ended. The sends waiting behind the one
    in flight are dropped, with no completion. */
+static void ur_close_now(struct ur_ring *r, int32_t fd);
 void ur_close(int64_t h, int32_t fd, uint64_t recv) {
     if (UR_EMULATED(h)) {
         urp_close(UR_POLL(h), fd, recv);
@@ -890,7 +900,16 @@ void ur_close(int64_t h, int32_t fd, uint64_t recv) {
         }
         f->head = f->last = NULL;
         f->gen++;
+        if (f->shut) {
+            f->closing = 1;
+            return;
+        }
     }
+    ur_close_now(r, fd);
+}
+
+/* Queues fd's close on its ring r. */
+static void ur_close_now(struct ur_ring *r, int32_t fd) {
     struct io_uring_sqe *sqe = ur_sqe_on(r);
     if (UR_FD_DIRECT(fd)) {
         io_uring_prep_close_direct(sqe, (unsigned)UR_FD_SLOT(fd));
@@ -900,6 +919,16 @@ void ur_close(int64_t h, int32_t fd, uint64_t recv) {
     }
     io_uring_sqe_set_data64(sqe, UR_QUIET);
     sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+}
+
+/* A direct shutdown's completion, for the fd with record x: the close it
+   held back goes out once it was the last. */
+static void ur_shut_done(struct ur *u, uint32_t x) {
+    struct ur_fd *f = &u->fds[x];
+    if (--f->shut > 0 || !f->closing) return;
+    f->closing = 0;
+    uint32_t ri = x / u->slots;
+    ur_close_now(&u->rs[ri], UR_DIRECT_FD | (int32_t)(ri << UR_SLOT_BITS) | (int32_t)(x % u->slots));
 }
 
 /* net_close, net_peer, and net_shutdown on a direct fd of the calling
@@ -916,11 +945,13 @@ static int32_t ur_direct_peer(int32_t fd, uint8_t *out) {
 }
 
 static int32_t ur_direct_shutdown(int32_t fd, int32_t how) {
+    struct ur_fd *f = ur_fd_of(ur_direct, fd);
+    if (!f) return -ENOMEM;
+    f->shut++;
     struct io_uring_sqe *sqe = ur_sqe_on(ur_ring_of(ur_direct, fd));
     io_uring_prep_shutdown(sqe, fd, how);
     ur_target(sqe, fd);
-    io_uring_sqe_set_data64(sqe, UR_QUIET);
-    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    io_uring_sqe_set_data64(sqe, (UR_SHUT | ur_fdx(ur_direct, fd)) << 2 | UR_ARMED);
     return 0;
 }
 
@@ -1118,6 +1149,10 @@ static int32_t ur_reap(struct ur *u, int32_t ri, ur_completions out, int32_t n) 
             }
             if (v & UR_ACCEPTED) {
                 n += ur_accepted(u, (int32_t)(v >> 8 & 0xffff), (int32_t)(v & 0xff), cqe->res, c);
+                continue;
+            }
+            if (v & UR_SHUT) {
+                ur_shut_done(u, (uint32_t)v);
                 continue;
             }
             int32_t k = (int32_t)v;

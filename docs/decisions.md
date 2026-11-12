@@ -1376,6 +1376,10 @@ connection's fd as a flag bit, its ring, and its slot, and `net_close`, `net_pee
 - `send(2)` can't reach a direct descriptor, so a send of 64 KB or more queues as a
   smaller one does.
 - A cancel of a connection's tag goes to every ring, as the tag doesn't say which.
+- A close waits for the connection's shutdowns in flight. The kernel runs a shutdown
+  from io-wq and finds a fixed file by its slot only then, and frees a closed slot to
+  the next accept first: a shutdown queued before the close hit the next connection
+  in that slot, which h2spec's TLS run showed as an EOF in 23% of runs (2026-11-12).
 - The emulated ring and IOCP ignore the setting: their connections stay plain
   descriptors, as outbound sockets on every ring do.
 
