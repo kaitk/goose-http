@@ -133,6 +133,13 @@ struct Config {
     ring_entries: i32 = 4096,
     ring_buffers: i32 = 64,
     ring_buffer_size: i32 = 4096,
+    // On io_uring, whether connections are direct descriptors: slots in the
+    // ring's file table, not the process's descriptor table, so a worker
+    // holds past RLIMIT_NOFILE connections, adding a ring of that many slots
+    // as each fills, up to 16. Reply.fd is then no descriptor for system
+    // calls: http::peer works, through the address its accept kept. The
+    // emulated ring ignores it.
+    ring_direct: bool = false,
     // On io_uring, how long in microseconds a wait that would block holds
     // for more completions, up to a pass's 256, before the loop answers
     // those it has: one wake for many under load, for up to this much

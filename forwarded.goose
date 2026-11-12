@@ -25,7 +25,8 @@ struct Network { ip: u8[16] = [0; 16], bits: i32 = 0 }
 
 // The address of out's connection's peer, and whether it has one: a request
 // that a loop didn't give, or a peer without an IP address, has none. A
-// getpeername, made only when called.
+// getpeername, made only when called; on a direct descriptor
+// (Config.ring_direct), the address its accept kept.
 fn peer(out: Reply) -> Address, bool {
     var a = Address { .. };
     guard out.fd >= 0 else { return a, false; }

@@ -1356,6 +1356,45 @@ Rejected: Linux 6.12's minimum wait (`IORING_ENTER_EXT_ARG` with `min_wait_usec`
 which does it in one enter, but the kernels goose-http serves include 6.8; and a count
 of completions to wait for beside the time, which the pass's size already sets.
 
+## Direct descriptors and rings past the first, behind `Config.ring_direct`
+
+Decided 2026-11-12, for Plod's $12 Server Challenge entry (Plod's task 063).
+
+With `ring_direct`, the io_uring loop accepts each connection into a slot of its ring's
+file table and receives, sends, splices, shuts down, and closes it there as a fixed
+file. A table holds `RLIMIT_NOFILE` slots, so when the accepting ring's slots are
+taken, accepts move to a ring with a quarter of its slots free, or to a new one, up to
+16 a worker. Ring 0 waits; the others submit and collect in the same `ur_wait` without
+waiting, and share one eventfd that ring 0 polls, which the kernel signals when work
+reaches a ring that had none queued. All of it is in `shim/uring.c`: Goose sees a
+connection's fd as a flag bit, its ring, and its slot, and `net_close`, `net_peer`, and
+`net_shutdown` route such an fd to the thread's ring.
+
+- Accepts are single-shot, 32 a listener in flight, as only they give the peer's
+  address, which the slot keeps for `http::peer`. Each accept counts against its
+  ring's slots from when it's queued, so a table never fills under an accept.
+- `send(2)` can't reach a direct descriptor, so a send of 64 KB or more queues as a
+  smaller one does.
+- A cancel of a connection's tag goes to every ring, as the tag doesn't say which.
+- The emulated ring and IOCP ignore the setting: their connections stay plain
+  descriptors, as outbound sockets on every ring do.
+
+Why: the challenge's box gives a process 65,535 descriptors, and every client holds
+a connection, so the entry ran a process per 64,000 connections. With 3 processes,
+SQLite's page cache was thrown away at nearly every read, as each process's commits
+change the WAL the others read: 42.0 to 42.7 µs a request against 21.4 to 22.0 for
+one process with direct descriptors, batched waits, and exclusive locking (Docker's
+arm64 VM on an M1 Pro, Linux 7.0, 1 CPU, 4,000 k6 users, two runs each). At 4,000
+connections, direct descriptors cost nothing measurable: 21.4 µs in each of three
+alternating rounds against 21.1 to 22.8 without. With `RLIMIT_NOFILE` at 512, the
+same load ran on 8 rings with no failed request, and the process held 16 descriptors;
+each extra ring adds an enter a pass, 2 µs a request at 8.
+
+Rejected: `IORING_OP_FIXED_FD_INSTALL` or `getpeername` for the peer, which need a
+free descriptor, the one thing a full table lacks; one process per 64,000
+connections, the cache cost above; and registering accepted plain descriptors into
+the table, which still needs a free descriptor per accept.
+
 ## Not yet decided
 
 ### Compression in an optional module

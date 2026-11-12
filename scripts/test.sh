@@ -15,7 +15,7 @@
 #
 # The loops are uring and epoll on Linux and macOS, where the uring build is
 # also tested over the emulation on epoll it falls back to (LOOP=uring-epoll)
-# on Linux, and iocp on Windows, in Git Bash. On Windows the typecheck is the
+# and with direct descriptors (LOOP=uring-direct) on Linux, and iocp on Windows, in Git Bash. On Windows the typecheck is the
 # Windows compiler's, which no other step runs there.
 #
 # GOOSE names the compiler, and CC the C compiler, as for build.sh; PORT and
@@ -118,6 +118,10 @@ for loop in $loops; do
         step "test-http.sh, uring loop over epoll"
         LOAD=short LOOP=uring-epoll "$root/scripts/test-http.sh"
         h2spec uring-epoll
+        drain
+        step "test-http.sh, uring loop with direct descriptors"
+        LOAD=short LOOP=uring-direct "$root/scripts/test-http.sh"
+        h2spec uring-direct
     fi
 done
 

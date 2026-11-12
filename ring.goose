@@ -31,6 +31,8 @@ extern "ur_create" fn ring_create(entries: i32, nbufs: i32, buflen: i32, flags: 
 // ring_create's flags.
 let RING_EMULATE: i32 = 1;
 let RING_REQUIRE: i32 = 2;
+// On io_uring, connections are direct descriptors (Config.ring_direct).
+let RING_DIRECT: i32 = 4;
 
 // Whether ring_create gets the platform's own ring: 0, or -code for why it
 // falls back to the emulation (ENOSYS on macOS, which has no other). A

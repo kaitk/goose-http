@@ -209,12 +209,30 @@ int64_t net_send(int32_t fd, net_bytes data) {
     return r < 0 ? -errno : r;
 }
 
+/* An io_uring ring's direct descriptor, which isn't in the process's table:
+   shim/uring.c's UR_DIRECT_FD, and the calls on one that its ring gives the
+   thread that owns it (net_direct_ring). */
+#define NET_DIRECT_FD (1 << 30)
+#define NET_DIRECT(fd) ((fd) >= 0 && ((fd) & NET_DIRECT_FD) && net_direct_close)
+static _Thread_local int32_t (*net_direct_close)(int32_t fd);
+static _Thread_local int32_t (*net_direct_peer)(int32_t fd, uint8_t *out);
+static _Thread_local int32_t (*net_direct_shutdown)(int32_t fd, int32_t how);
+
+void net_direct_ring(int32_t (*close_fd)(int32_t), int32_t (*peer)(int32_t, uint8_t *),
+                     int32_t (*shut)(int32_t, int32_t)) {
+    net_direct_close = close_fd;
+    net_direct_peer = peer;
+    net_direct_shutdown = shut;
+}
+
 int32_t net_shutdown(int32_t fd, int32_t how) {
+    if (NET_DIRECT(fd)) return net_direct_shutdown(fd, how);
     return shutdown(fd, how) < 0 ? -errno : 0;
 }
 
 /* A worker's fd for a shared Unix socket goes back to the table (above). */
 int32_t net_close(int32_t fd) {
+    if (NET_DIRECT(fd)) return net_direct_close(fd);
     if (fd == net_my_lfd) {
         pthread_mutex_lock(&net_shared_lock);
         if (--net_shared[net_my_entry].sharers == 0) {
@@ -234,6 +252,7 @@ int32_t net_peer(int32_t fd, net_bytes out) {
     struct sockaddr_storage ss;
     socklen_t len = sizeof ss;
     if (out.len < 16) return -EINVAL;
+    if (NET_DIRECT(fd)) return net_direct_peer(fd, out.data);
     if (getpeername(fd, (struct sockaddr *)&ss, &len) < 0) return -errno;
     if (ss.ss_family == AF_INET) {
         struct sockaddr_in *a = (struct sockaddr_in *)&ss;

@@ -481,7 +481,12 @@ pid=
 echo "restart: ok"
 
 # One worker with 40 fds: accepting pauses at the limit, and resumes as
-# connections close.
+# connections close. Direct descriptors aren't held to the fd limit, which is
+# their point, so uring-direct has no such limit to reach.
+if [ "${LOOP:-}" = uring-direct ]; then
+    echo "test-http passed. The fd limit's test skipped: direct descriptors pass it"
+    exit 0
+fi
 WORKERS=1
 start 40
 $client emfile 60

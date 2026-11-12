@@ -18,7 +18,8 @@ fn usage() {
 // Runs the mode the command line names. The http mode serves with the loop
 // LOOP names, epoll or uring (iocp on Windows, the same loop), or with
 // default_loop without it. uring-epoll is the uring loop over the emulation
-// it falls back to where io_uring is blocked. TLS adds the TLS listener, if
+// it falls back to where io_uring is blocked, and uring-direct the uring loop
+// with direct descriptors (Config.ring_direct). TLS adds the TLS listener, if
 // the root file serves one (https.goose), and WORKERS runs the workers,
 // given cfg and whether the loop is epoll.
 fn run<TLS, WORKERS>(default_loop: const u8[:]) {
@@ -89,8 +90,9 @@ fn serve_http<TLS, WORKERS>(given: http::Config, default_loop: const u8[:]) {
     if !env("LOOP", name) { name.append(default_loop); }
     let epoll = name == "epoll";
     cfg.emulate_ring = name == "uring-epoll";
-    guard epoll || cfg.emulate_ring || name == "uring" || name == "iocp" else {
-        write_stderr("LOOP must be epoll, uring, uring-epoll, or iocp\n");
+    cfg.ring_direct = name == "uring-direct";
+    guard epoll || cfg.emulate_ring || cfg.ring_direct || name == "uring" || name == "iocp" else {
+        write_stderr("LOOP must be epoll, uring, uring-epoll, uring-direct, or iocp\n");
         exit(2);
     }
     // The server also serves h2c, HTTP/2 with prior knowledge, on H2C_PORT,

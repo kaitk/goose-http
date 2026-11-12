@@ -19,6 +19,16 @@
    struct ur, and belongs to the thread that created it
    (IORING_SETUP_SINGLE_ISSUER).
 
+   With UR_DIRECT, connections are direct descriptors: slots in a ring's
+   file table, outside the process's descriptor table and its RLIMIT_NOFILE.
+   A table holds RLIMIT_NOFILE slots, so a worker adds rings as tables fill,
+   up to UR_RINGS; ring 0 waits, and the others wake it through an eventfd
+   they share. Goose sees such a connection's fd as UR_DIRECT_FD, its ring,
+   and its slot, and every call here routes by it; net_close, net_peer, and
+   net_shutdown reach the ring through ur_direct (shim/net.c). Accepts are
+   single-shot, UR_ACCEPTS a listener at a time, as only they give the
+   peer's address, which a slot keeps for net_peer.
+
    Where io_uring_setup fails, as under Docker's default seccomp profile, or
    when asked, a ring is shim/ring_epoll.c's emulation over epoll instead:
    its address with the low bit set, which a struct ur's never has, and each
@@ -33,8 +43,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 
 _Static_assert(ENOBUFS == 105 && ECANCELED == 125, "errno values differ from src/ring.goose");
@@ -62,6 +76,19 @@ _Static_assert(sizeof(ur_bytes) == sizeof(void *) + 8 && sizeof(ur_completion) =
 #define UR_SEND 1
 #define UR_QUIET 2
 #define UR_ARMED 3
+/* Under UR_ARMED, past any armed socket's index: a direct accept, with its
+   listener and record below, and ring 0's poll of the extra rings' eventfd. */
+#define UR_ACCEPTED ((uint64_t)1 << 56)
+#define UR_XRINGS ((uint64_t)1 << 57)
+
+/* A direct connection's fd, as Goose sees it. */
+#define UR_DIRECT_FD (1 << 30)
+#define UR_SLOT_BITS 20
+#define UR_FD_DIRECT(fd) (((fd) & UR_DIRECT_FD) != 0)
+#define UR_FD_RING(fd) (((fd) >> UR_SLOT_BITS) & 0x3ff)
+#define UR_FD_SLOT(fd) ((fd) & ((1 << UR_SLOT_BITS) - 1))
+#define UR_RINGS 16
+#define UR_ACCEPTS 32
 
 /* A socket net_arm armed on the ring (ur_arm): a one-shot poll for the key of
    the exchange that waits for it. A key takes 64 bits, so it stays here, and
@@ -145,12 +172,53 @@ struct ur_fd {
     uint32_t gen;
 };
 
-struct ur {
+/* A direct slot's peer, as net_peer gives it: the address IPv6 or
+   IPv4-mapped, and the port, or -EAFNOSUPPORT. */
+struct ur_peer {
+    uint8_t addr[16];
+    int32_t port;
+};
+
+/* A ring and its provided buffers, which its receives' completions number
+   from its index times nbufs. */
+struct ur_ring {
     struct io_uring ring;
     struct io_uring_buf_ring *br;
     unsigned char *bufs;
-    uint32_t nbufs, buflen;
     int given;              /* buffers given back since the last ur_wait */
+    uint32_t open;          /* direct: slots in use, or an accept's to fill */
+    struct ur_peer *peers;  /* direct: each slot's */
+};
+
+/* A direct accept in flight, into its sockaddr; ring -1 when free. */
+struct ur_acc {
+    int32_t ring;
+    socklen_t len;
+    struct sockaddr_storage ss;
+};
+
+/* A listener that direct accepts serve, while wanted, from ur_accept to its
+   cancel or an error. */
+struct ur_listen {
+    int32_t fd;
+    uint64_t tag;
+    int wanted;
+    int32_t inflight;
+    struct ur_acc acc[UR_ACCEPTS];
+};
+
+struct ur {
+    struct ur_ring rs[UR_RINGS];
+    int32_t nrs;
+    uint32_t nbufs, buflen;
+    /* Direct descriptors: each table's slots, the ring accepts go to, the
+       listeners, and the eventfd the extra rings signal, or -1. */
+    int direct;
+    uint32_t slots;
+    int32_t acc;
+    struct ur_listen **ls;
+    int32_t nls;
+    int32_t xfd;
     struct ur_send *free[UR_CLASSES];
     struct ur_send *big;
     uint32_t kept;          /* the bytes of big's records */
@@ -176,11 +244,20 @@ struct ur {
    it. */
 static _Thread_local struct ur *ur_bound;
 
+/* The calling thread's ring with direct descriptors, for net_close,
+   net_peer, and net_shutdown on one. */
+static _Thread_local struct ur *ur_direct;
+
 /* From shim/net.c. */
 int64_t net_waker(int32_t ep, uint64_t tag);
 int32_t net_waker_fd(int64_t w);
 void net_waker_clear(int64_t w);
 void net_loop_ring(int32_t (*arm)(int32_t fd, uint32_t events, uint64_t tag), void (*disarm)(uint64_t tag));
+void net_direct_ring(int32_t (*close_fd)(int32_t), int32_t (*peer)(int32_t, uint8_t *),
+                     int32_t (*shut)(int32_t, int32_t));
+static int32_t ur_direct_close(int32_t fd);
+static int32_t ur_direct_peer(int32_t fd, uint8_t *out);
+static int32_t ur_direct_shutdown(int32_t fd, int32_t how);
 
 /* shim/ring_epoll.c, built with its functions named urp_*. */
 int64_t urp_create(int32_t entries, int32_t nbufs, int32_t buflen, int32_t flags);
@@ -204,9 +281,11 @@ int64_t shared_claim_len(const struct shared_claim *c);
 int32_t shared_claim_iov(const struct shared_claim *c, int64_t off, struct iovec *v, int32_t max);
 void shared_claim_free(struct shared_claim *c);
 
-/* ur_create's flags, ring.goose's RING_EMULATE and RING_REQUIRE. */
+/* ur_create's flags, ring.goose's RING_EMULATE, RING_REQUIRE, and
+   RING_DIRECT. */
 #define UR_EMULATE 1
 #define UR_REQUIRE 2
+#define UR_DIRECT 4
 
 /* Whether h is an emulated ring, and the emulation's own handle for it. */
 #define UR_EMULATED(h) (((h) & 1) != 0)
@@ -237,60 +316,188 @@ int32_t ur_probe(void) {
    fall back to takes this many. */
 int32_t ur_listeners(void) { return urp_listeners(); }
 
-/* An SQE, submitting what's queued first if the submission queue is full. */
-static struct io_uring_sqe *ur_sqe(struct ur *u) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&u->ring);
+/* An SQE on ring r, submitting what's queued first if its submission queue
+   is full. */
+static struct io_uring_sqe *ur_sqe_on(struct ur_ring *r) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
     if (!sqe) {
-        io_uring_submit(&u->ring);
-        sqe = io_uring_get_sqe(&u->ring);
+        io_uring_submit(&r->ring);
+        sqe = io_uring_get_sqe(&r->ring);
     }
     return sqe;
 }
 
-/* A ring of entries submission entries and four times as many completions,
-   with nbufs provided buffers of buflen bytes in buffer group 0. nbufs must
-   be a power of two. */
-int64_t ur_create(int32_t entries, int32_t nbufs, int32_t buflen, int32_t flags) {
-    if (flags & UR_EMULATE) return ur_emulate(entries, nbufs, buflen);
-    struct ur *u = calloc(1, sizeof *u);
-    if (!u) return -ENOMEM;
+static struct io_uring_sqe *ur_sqe(struct ur *u) { return ur_sqe_on(&u->rs[0]); }
+
+/* The ring a connection's requests go to. */
+static struct ur_ring *ur_ring_of(struct ur *u, int32_t fd) {
+    return &u->rs[UR_FD_DIRECT(fd) ? UR_FD_RING(fd) : 0];
+}
+
+/* Points sqe, prepared with fd, at a direct fd's slot as a fixed file. */
+static void ur_target(struct io_uring_sqe *sqe, int32_t fd) {
+    if (!UR_FD_DIRECT(fd)) return;
+    sqe->fd = UR_FD_SLOT(fd);
+    sqe->flags |= IOSQE_FIXED_FILE;
+}
+
+/* Sets up ring r, with entries submission entries and four times as many
+   completions, nbufs provided buffers of buflen bytes in buffer group 0, and
+   with direct descriptors, slots of them. nbufs must be a power of two.
+   Returns 0 or the error, with nothing left to free. */
+static int ur_ring_init(struct ur_ring *r, int32_t entries, uint32_t nbufs, uint32_t buflen, uint32_t slots) {
     struct io_uring_params p;
     memset(&p, 0, sizeof p);
     p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
               IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
     p.cq_entries = (unsigned)entries * 4;
-    int r = io_uring_queue_init_params((unsigned)entries, &u->ring, &p);
-    if (r < 0) {
-        free(u);
-        return flags & UR_REQUIRE ? r : ur_emulate(entries, nbufs, buflen);
+    int e = io_uring_queue_init_params((unsigned)entries, &r->ring, &p);
+    if (e < 0) return e;
+    if (slots) {
+        e = io_uring_register_files_sparse(&r->ring, slots);
+        r->peers = e < 0 ? NULL : calloc(slots, sizeof *r->peers);
+        if (e >= 0 && !r->peers) e = -ENOMEM;
+        if (e < 0) {
+            io_uring_queue_exit(&r->ring);
+            return e;
+        }
     }
+    r->bufs = aligned_alloc(4096, (size_t)nbufs * (size_t)buflen);
+    if (!r->bufs) e = -ENOMEM;
+    else r->br = io_uring_setup_buf_ring(&r->ring, nbufs, 0, 0, &e);
+    if (!r->br) {
+        io_uring_queue_exit(&r->ring);
+        free(r->bufs);
+        free(r->peers);
+        return e;
+    }
+    int mask = io_uring_buf_ring_mask(nbufs);
+    for (uint32_t i = 0; i < nbufs; i++)
+        io_uring_buf_ring_add(r->br, r->bufs + (size_t)i * buflen, buflen, (unsigned short)i, mask, (int)i);
+    io_uring_buf_ring_advance(r->br, (int)nbufs);
+    return 0;
+}
+
+/* A ring of entries submission entries and four times as many completions,
+   with nbufs provided buffers of buflen bytes in buffer group 0. nbufs must
+   be a power of two. With UR_DIRECT, its connections are direct descriptors,
+   in tables of RLIMIT_NOFILE slots. */
+int64_t ur_create(int32_t entries, int32_t nbufs, int32_t buflen, int32_t flags) {
+    if (flags & UR_EMULATE) return ur_emulate(entries, nbufs, buflen);
+    struct ur *u = calloc(1, sizeof *u);
+    if (!u) return -ENOMEM;
     u->nbufs = (uint32_t)nbufs;
     u->buflen = (uint32_t)buflen;
-    u->bufs = aligned_alloc(4096, (size_t)nbufs * (size_t)buflen);
-    if (!u->bufs) r = -ENOMEM;
-    else u->br = io_uring_setup_buf_ring(&u->ring, (unsigned)nbufs, 0, 0, &r);
-    if (!u->br) {
-        io_uring_queue_exit(&u->ring);
-        free(u->bufs);
+    u->xfd = -1;
+    if (flags & UR_DIRECT) {
+        struct rlimit l;
+        rlim_t n = getrlimit(RLIMIT_NOFILE, &l) == 0 ? l.rlim_cur : 1024;
+        u->direct = 1;
+        u->slots = n < ((rlim_t)1 << UR_SLOT_BITS) ? (uint32_t)n : (1u << UR_SLOT_BITS) - 1;
+    }
+    int r = ur_ring_init(&u->rs[0], entries, u->nbufs, u->buflen, u->slots);
+    if (r < 0) {
         free(u);
         return r == -ENOMEM || (flags & UR_REQUIRE) ? r : ur_emulate(entries, nbufs, buflen);
     }
-    int mask = io_uring_buf_ring_mask((unsigned)nbufs);
-    for (int i = 0; i < nbufs; i++)
-        io_uring_buf_ring_add(u->br, u->bufs + (size_t)i * u->buflen, u->buflen,
-                              (unsigned short)i, mask, i);
-    io_uring_buf_ring_advance(u->br, nbufs);
+    u->nrs = 1;
+    if (u->direct) {
+        ur_direct = u;
+        net_direct_ring(ur_direct_close, ur_direct_peer, ur_direct_shutdown);
+    }
     return (int64_t)(intptr_t)u;
 }
 
-/* Queues a multishot accept on the listener fd. Accepted sockets are
-   blocking, which io_uring doesn't need otherwise. */
+/* Ring 0's poll of the extra rings' eventfd, which each wakes when work
+   comes to it while it has none queued. */
+static void ur_poll_xrings(struct ur *u) {
+    struct io_uring_sqe *sqe = ur_sqe(u);
+    io_uring_prep_poll_multishot(sqe, u->xfd, POLLIN);
+    io_uring_sqe_set_data64(sqe, UR_XRINGS << 2 | UR_ARMED);
+}
+
+/* Another ring, as ring 0 is set up, or -1. */
+static int32_t ur_add_ring(struct ur *u) {
+    if (u->nrs == UR_RINGS) return -1;
+    if (u->xfd < 0) {
+        u->xfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (u->xfd < 0) return -1;
+        ur_poll_xrings(u);
+    }
+    struct ur_ring *r = &u->rs[u->nrs];
+    memset(r, 0, sizeof *r);
+    if (ur_ring_init(r, (int32_t)u->rs[0].ring.sq.ring_entries, u->nbufs, u->buflen, u->slots) < 0) return -1;
+    if (io_uring_register_eventfd(&r->ring, u->xfd) < 0) {
+        io_uring_free_buf_ring(&r->ring, r->br, u->nbufs, 0);
+        io_uring_queue_exit(&r->ring);
+        free(r->bufs);
+        free(r->peers);
+        return -1;
+    }
+    return u->nrs++;
+}
+
+/* The ring to accept into, with a slot free for one more accept: the one
+   accepts go to while it has room, else the first with a quarter of its
+   slots free, else a new one. -1 when no ring can take one. */
+static int32_t ur_accepting(struct ur *u) {
+    if (u->rs[u->acc].open < u->slots) return u->acc;
+    for (int32_t i = 0; i < u->nrs; i++) {
+        if (u->rs[i].open <= u->slots - u->slots / 4) return u->acc = i;
+    }
+    int32_t i = ur_add_ring(u);
+    return i < 0 ? -1 : (u->acc = i);
+}
+
+/* Queues listener l's direct accepts, up to UR_ACCEPTS in flight. */
+static void ur_fill(struct ur *u, int32_t li) {
+    struct ur_listen *l = u->ls[li];
+    for (int32_t k = 0; l->wanted && k < UR_ACCEPTS; k++) {
+        struct ur_acc *a = &l->acc[k];
+        if (a->ring >= 0) continue;
+        int32_t ri = ur_accepting(u);
+        if (ri < 0) return;
+        struct ur_ring *r = &u->rs[ri];
+        a->ring = ri;
+        a->len = sizeof a->ss;
+        r->open++;
+        l->inflight++;
+        struct io_uring_sqe *sqe = ur_sqe_on(r);
+        /* No SOCK_CLOEXEC: a direct descriptor has nothing to close at exec,
+           and the kernel refuses the flag for one. */
+        io_uring_prep_accept_direct(sqe, l->fd, (struct sockaddr *)&a->ss, &a->len, 0,
+                                    IORING_FILE_INDEX_ALLOC);
+        io_uring_sqe_set_data64(sqe, (UR_ACCEPTED | (uint64_t)li << 8 | (uint64_t)k) << 2 | UR_ARMED);
+    }
+}
+
+/* Queues a multishot accept on the listener fd, or with direct descriptors
+   single-shot ones, which go on until a cancel of tag or an error. Accepted
+   sockets are blocking, which io_uring doesn't need otherwise. */
 void ur_accept(int64_t h, int32_t fd, uint64_t tag) {
     if (UR_EMULATED(h)) {
         urp_accept(UR_POLL(h), fd, tag);
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
+    if (u->direct) {
+        int32_t li = 0;
+        while (li < u->nls && u->ls[li]->fd != fd) li++;
+        if (li == u->nls) {
+            struct ur_listen **g = realloc(u->ls, (size_t)(u->nls + 1) * sizeof *g);
+            struct ur_listen *l = g ? malloc(sizeof *l) : NULL;
+            if (g) u->ls = g;
+            if (!l) return;
+            l->fd = fd;
+            l->inflight = 0;
+            for (int k = 0; k < UR_ACCEPTS; k++) l->acc[k].ring = -1;
+            u->ls[u->nls++] = l;
+        }
+        u->ls[li]->tag = tag;
+        u->ls[li]->wanted = 1;
+        ur_fill(u, li);
+        return;
+    }
     struct io_uring_sqe *sqe = ur_sqe(u);
     io_uring_prep_multishot_accept(sqe, fd, NULL, NULL, SOCK_CLOEXEC);
     io_uring_sqe_set_data64(sqe, tag << 2 | UR_TAGGED);
@@ -303,8 +510,9 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
-    struct io_uring_sqe *sqe = ur_sqe(u);
+    struct io_uring_sqe *sqe = ur_sqe_on(ur_ring_of(u, fd));
     io_uring_prep_recv_multishot(sqe, fd, NULL, 0, 0);
+    ur_target(sqe, fd);
     sqe->flags |= IOSQE_BUFFER_SELECT;
     sqe->buf_group = 0;
     io_uring_sqe_set_data64(sqe, tag << 2 | UR_TAGGED);
@@ -314,17 +522,22 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
    of the file into the pipe while it's empty, else of the pipe into the
    socket, or a no-op to report err. */
 static void ur_prep_send(struct ur *u, struct ur_send *s) {
-    struct io_uring_sqe *sqe = ur_sqe(u);
+    struct io_uring_sqe *sqe = ur_sqe_on(ur_ring_of(u, s->fd));
     if (s->claim) {
         struct ur_gather *g = ur_gather_of(s);
         g->m = (struct msghdr){ .msg_iov = g->v, .msg_iovlen = (size_t)shared_claim_iov(s->claim, s->off, g->v, UR_IOV) };
         io_uring_prep_sendmsg(sqe, s->fd, &g->m, MSG_NOSIGNAL);
+        ur_target(sqe, s->fd);
     } else if (s->file < 0) {
         io_uring_prep_send(sqe, s->fd, s->data + s->off, s->len - s->off, MSG_NOSIGNAL);
+        ur_target(sqe, s->fd);
     } else if (s->err) {
         io_uring_prep_nop(sqe);
     } else if (s->piped > 0) {
+        /* A splice's fd is its output, so a fixed file is the socket's; the
+           pipe, its input, stays a plain descriptor. */
         io_uring_prep_splice(sqe, s->pipe->rd, -1, s->fd, -1, s->piped, 0);
+        ur_target(sqe, s->fd);
     } else {
         uint32_t n = s->fleft < s->pipe->cap ? (uint32_t)s->fleft : s->pipe->cap;
         io_uring_prep_splice(sqe, s->file, s->foff, s->pipe->wr, -1, n, 0);
@@ -332,18 +545,24 @@ static void ur_prep_send(struct ur *u, struct ur_send *s) {
     io_uring_sqe_set_data64(sqe, (uint64_t)(uintptr_t)s | UR_SEND);
 }
 
+/* fd's place among the records: a direct one's by its ring and slot. */
+static uint32_t ur_fdx(struct ur *u, int32_t fd) {
+    return UR_FD_DIRECT(fd) ? (uint32_t)UR_FD_RING(fd) * u->slots + (uint32_t)UR_FD_SLOT(fd) : (uint32_t)fd;
+}
+
 /* fd's record, or NULL when out of memory. */
 static struct ur_fd *ur_fd_of(struct ur *u, int32_t fd) {
-    if ((uint32_t)fd >= u->nfds) {
+    uint32_t x = ur_fdx(u, fd);
+    if (x >= u->nfds) {
         uint32_t n = u->nfds ? u->nfds : 1024;
-        while (n <= (uint32_t)fd) n *= 2;
+        while (n <= x) n *= 2;
         struct ur_fd *g = realloc(u->fds, n * sizeof *g);
         if (!g) return NULL;
         memset(g + u->nfds, 0, (n - u->nfds) * sizeof *g);
         u->fds = g;
         u->nfds = n;
     }
-    return &u->fds[fd];
+    return &u->fds[x];
 }
 
 /* Appends s to f's sends, and queues it if it's first. */
@@ -377,7 +596,9 @@ int32_t ur_send(int64_t h, int32_t fd, uint64_t tag, ur_bytes data) {
     }
     s = NULL;
     uint32_t pre = 0;
-    if (!f->head && data.len >= UR_INLINE) {
+    /* send(2) needs a descriptor in the process's table, which a direct
+       one isn't. */
+    if (!f->head && data.len >= UR_INLINE && !UR_FD_DIRECT(fd)) {
         /* The completion's slot comes first: once every byte has gone out,
            the send can't fail. */
         if (u->nsent == u->capsent) {
@@ -552,7 +773,7 @@ static void ur_send_free(struct ur *u, struct ur_send *s);
    send. Returns whether it wrote a completion into c: one for each piece
    that went out, and one for an error. */
 static int ur_file_step(struct ur *u, struct ur_send *s, int32_t res, ur_completion *c) {
-    struct ur_fd *f = &u->fds[s->fd];
+    struct ur_fd *f = &u->fds[ur_fdx(u, s->fd)];
     int live = s->gen == f->gen;
     int32_t err = live ? s->err : -ECANCELED;
     int more = 0;
@@ -609,17 +830,33 @@ static void ur_send_free(struct ur *u, struct ur_send *s) {
     }
 }
 
-/* Queues a cancel of the request queued with tag. */
+/* Queues a cancel on r of the request with user_data ud. */
+static void ur_cancel_on(struct ur_ring *r, uint64_t ud) {
+    struct io_uring_sqe *sqe = ur_sqe_on(r);
+    io_uring_prep_cancel64(sqe, ud, 0);
+    io_uring_sqe_set_data64(sqe, UR_QUIET);
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+}
+
+/* Queues a cancel of the request queued with tag: with direct descriptors,
+   a listener's accepts, or on each ring, as the tag doesn't say which. */
 void ur_cancel(int64_t h, uint64_t tag) {
     if (UR_EMULATED(h)) {
         urp_cancel(UR_POLL(h), tag);
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
-    struct io_uring_sqe *sqe = ur_sqe(u);
-    io_uring_prep_cancel64(sqe, tag << 2 | UR_TAGGED, 0);
-    io_uring_sqe_set_data64(sqe, UR_QUIET);
-    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    for (int32_t li = 0; li < u->nls; li++) {
+        struct ur_listen *l = u->ls[li];
+        if (l->tag != tag || !l->wanted) continue;
+        l->wanted = 0;
+        for (int32_t k = 0; k < UR_ACCEPTS; k++) {
+            if (l->acc[k].ring >= 0)
+                ur_cancel_on(&u->rs[l->acc[k].ring], (UR_ACCEPTED | (uint64_t)li << 8 | (uint64_t)k) << 2 | UR_ARMED);
+        }
+        return;
+    }
+    for (int32_t i = 0; i < u->nrs; i++) ur_cancel_on(&u->rs[i], tag << 2 | UR_TAGGED);
 }
 
 /* Queues a cancel of the receive queued on fd with tag recv, unless recv is
@@ -633,11 +870,13 @@ void ur_close(int64_t h, int32_t fd, uint64_t recv) {
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
+    struct ur_ring *r = ur_ring_of(u, fd);
     /* By user_data, which the kernel finds by hash, and only what's there: a
        cancel by fd walks every bucket of the ring's poll table. */
-    if (recv) ur_cancel(h, recv);
-    if ((uint32_t)fd < u->nfds) {
-        struct ur_fd *f = &u->fds[fd];
+    if (recv) ur_cancel_on(r, recv << 2 | UR_TAGGED);
+    uint32_t x = ur_fdx(u, fd);
+    if (x < u->nfds) {
+        struct ur_fd *f = &u->fds[x];
         if (f->head) {
             for (struct ur_send *s = f->head->next, *next; s; s = next) {
                 next = s->next;
@@ -647,18 +886,59 @@ void ur_close(int64_t h, int32_t fd, uint64_t recv) {
             f->head->next = NULL;
             /* A splice may be filling its pipe: not empty, so not reused. */
             if (f->head->file >= 0) f->head->piped = 1;
-            struct io_uring_sqe *sqe = ur_sqe(u);
-            io_uring_prep_cancel64(sqe, (uint64_t)(uintptr_t)f->head | UR_SEND, 0);
-            io_uring_sqe_set_data64(sqe, UR_QUIET);
-            sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+            ur_cancel_on(r, (uint64_t)(uintptr_t)f->head | UR_SEND);
         }
         f->head = f->last = NULL;
         f->gen++;
     }
-    struct io_uring_sqe *sqe = ur_sqe(u);
-    io_uring_prep_close(sqe, fd);
+    struct io_uring_sqe *sqe = ur_sqe_on(r);
+    if (UR_FD_DIRECT(fd)) {
+        io_uring_prep_close_direct(sqe, (unsigned)UR_FD_SLOT(fd));
+        r->open--;
+    } else {
+        io_uring_prep_close(sqe, fd);
+    }
     io_uring_sqe_set_data64(sqe, UR_QUIET);
     sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+}
+
+/* net_close, net_peer, and net_shutdown on a direct fd of the calling
+   thread's ring (shim/net.c's net_direct_ring). */
+static int32_t ur_direct_close(int32_t fd) {
+    ur_close((int64_t)(intptr_t)ur_direct, fd, 0);
+    return 0;
+}
+
+static int32_t ur_direct_peer(int32_t fd, uint8_t *out) {
+    struct ur_peer *p = &ur_direct->rs[UR_FD_RING(fd)].peers[UR_FD_SLOT(fd)];
+    memcpy(out, p->addr, 16);
+    return p->port;
+}
+
+static int32_t ur_direct_shutdown(int32_t fd, int32_t how) {
+    struct io_uring_sqe *sqe = ur_sqe_on(ur_ring_of(ur_direct, fd));
+    io_uring_prep_shutdown(sqe, fd, how);
+    ur_target(sqe, fd);
+    io_uring_sqe_set_data64(sqe, UR_QUIET);
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    return 0;
+}
+
+/* Keeps accept a's peer for its slot. */
+static void ur_keep_peer(struct ur_ring *r, uint32_t slot, struct ur_acc *a) {
+    struct ur_peer *p = &r->peers[slot];
+    p->port = -EAFNOSUPPORT;
+    if (a->ss.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&a->ss;
+        memset(p->addr, 0, 10);
+        p->addr[10] = p->addr[11] = 0xff;
+        memcpy(p->addr + 12, &s->sin_addr, 4);
+        p->port = ntohs(s->sin_port);
+    } else if (a->ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&a->ss;
+        memcpy(p->addr, &s->sin6_addr, 16);
+        p->port = ntohs(s->sin6_port);
+    }
 }
 
 static void ur_poll_waker(struct ur *u) {
@@ -772,7 +1052,8 @@ void ur_take(int64_t h, int32_t buf, int64_t off, ur_bytes dst) {
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
-    memcpy(dst.data, u->bufs + (size_t)buf * u->buflen + off, (size_t)dst.len);
+    struct ur_ring *r = &u->rs[(uint32_t)buf / u->nbufs];
+    memcpy(dst.data, r->bufs + (size_t)((uint32_t)buf % u->nbufs) * u->buflen + off, (size_t)dst.len);
 }
 
 /* Gives provided buffer buf back to the kernel, at the next ur_wait. */
@@ -782,55 +1063,44 @@ void ur_give(int64_t h, int32_t buf) {
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
-    io_uring_buf_ring_add(u->br, u->bufs + (size_t)buf * u->buflen, u->buflen,
-                          (unsigned short)buf, io_uring_buf_ring_mask(u->nbufs), u->given++);
+    struct ur_ring *r = &u->rs[(uint32_t)buf / u->nbufs];
+    uint32_t b = (uint32_t)buf % u->nbufs;
+    io_uring_buf_ring_add(r->br, r->bufs + (size_t)b * u->buflen, u->buflen,
+                          (unsigned short)b, io_uring_buf_ring_mask(u->nbufs), r->given++);
 }
 
-/* Submits what's queued, waits up to timeout_ms (-1: no limit) for at least
-   one completion, and writes up to out.len of them into out. Leaves any
-   others for the next call. With batch_us above 0, a wait that may block
-   first waits for out.len completions, up to batch_us and never past
-   timeout_ms, and only with none by then for the first as before: one wake
-   for many completions under load, two enters when idle. Linux 6.12's
-   min_wait does it in one, but the kernels this serves include 6.8. */
-int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch_us) {
-    if (UR_EMULATED(h)) return urp_wait(UR_POLL(h), out, timeout_ms, batch_us);
-    struct ur *u = (struct ur *)(intptr_t)h;
-    if (u->given) {
-        io_uring_buf_ring_advance(u->br, u->given);
-        u->given = 0;
-    }
+/* A direct accept's completion on ring ri, for accept record k of listener
+   li: a new connection, reported as listener's tag with its fd, or an
+   error. The listener's accepts go on until a cancel or an error, so only
+   the last completion after either reports more as 0. Returns whether it
+   wrote a completion into c. */
+static int ur_accepted(struct ur *u, int32_t li, int32_t k, int32_t res, ur_completion *c) {
+    struct ur_listen *l = u->ls[li];
+    struct ur_acc *a = &l->acc[k];
+    struct ur_ring *r = &u->rs[a->ring];
+    int32_t ri = a->ring;
+    a->ring = -1;
+    l->inflight--;
+    if (res < 0) r->open--;
+    /* A client that gave up before its accept. */
+    if (res == -ECONNABORTED) res = -EAGAIN;
+    if (res >= 0) ur_keep_peer(r, (uint32_t)res, a);
+    else if (res != -ECANCELED && res != -EAGAIN) l->wanted = 0;
+    ur_fill(u, li);
+    if (res == -EAGAIN || (res == -ECANCELED && (l->wanted || l->inflight > 0))) return 0;
+    *c = (ur_completion){ .tag = l->tag, .buf = -1, .send = 0,
+                          .res = res >= 0 ? UR_DIRECT_FD | ri << UR_SLOT_BITS | res : res,
+                          .more = (uint8_t)(l->wanted || l->inflight > 0) };
+    return 1;
+}
+
+/* Writes ring ri's completions into out from n, up to out.len, and returns
+   the new count. */
+static int32_t ur_reap(struct ur *u, int32_t ri, ur_completions out, int32_t n) {
+    struct ur_ring *r = &u->rs[ri];
     struct io_uring_cqe *cqe;
-    int r;
-    long long left_us = timeout_ms < 0 ? -1 : (long long)timeout_ms * 1000;
-    if (u->nsent == 0 && batch_us > 0 && left_us != 0) {
-        long long us = left_us > 0 && left_us < batch_us ? left_us : batch_us;
-        struct __kernel_timespec ts = { us / 1000000, (us % 1000000) * 1000 };
-        r = io_uring_submit_and_wait_timeout(&u->ring, &cqe, (unsigned)out.len, &ts, NULL);
-        if (r < 0 && r != -ETIME) return r;
-        if (io_uring_cq_ready(&u->ring) > 0) goto take;
-        if (left_us > 0) {
-            left_us -= us;
-            timeout_ms = (int32_t)((left_us + 999) / 1000);
-            if (left_us == 0) goto take;
-        }
-    }
-    if (u->nsent > 0) {
-        r = io_uring_submit_and_get_events(&u->ring);
-    } else if (timeout_ms < 0) {
-        r = io_uring_submit_and_wait(&u->ring, 1);
-    } else {
-        struct __kernel_timespec ts = { timeout_ms / 1000, (long long)(timeout_ms % 1000) * 1000000 };
-        r = io_uring_submit_and_wait_timeout(&u->ring, &cqe, 1, &ts, NULL);
-    }
-    if (r < 0 && r != -ETIME) return r;
-take:;
-    int32_t n = u->nsent < out.len ? u->nsent : (int32_t)out.len;
-    memcpy(out.data, u->sent, (size_t)n * sizeof *u->sent);
-    u->nsent -= n;
-    memmove(u->sent, u->sent + n, (size_t)u->nsent * sizeof *u->sent);
     unsigned head, seen = 0;
-    io_uring_for_each_cqe(&u->ring, head, cqe) {
+    io_uring_for_each_cqe(&r->ring, head, cqe) {
         if (n == out.len) break;
         seen++;
         uint64_t ud = cqe->user_data;
@@ -839,7 +1109,18 @@ take:;
            pass. */
         if (ud & 2) {
             if ((ud & 3) == UR_QUIET) continue;
-            int32_t k = (int32_t)(ud >> 2);
+            uint64_t v = ud >> 2;
+            if (v & UR_XRINGS) {
+                uint64_t x;
+                if (read(u->xfd, &x, sizeof x) < 0) { /* already empty */ }
+                if (!(cqe->flags & IORING_CQE_F_MORE)) ur_poll_xrings(u);
+                continue;
+            }
+            if (v & UR_ACCEPTED) {
+                n += ur_accepted(u, (int32_t)(v >> 8 & 0xffff), (int32_t)(v & 0xff), cqe->res, c);
+                continue;
+            }
+            int32_t k = (int32_t)v;
             if (u->arms[k].state == UR_ARM_STALE) {
                 ur_arm_free(u, k);
                 continue;
@@ -855,7 +1136,7 @@ take:;
                 n += ur_file_step(u, s, cqe->res, c);
                 continue;
             }
-            struct ur_fd *f = &u->fds[s->fd];
+            struct ur_fd *f = &u->fds[ur_fdx(u, s->fd)];
             int live = s->gen == f->gen;
             int rest = cqe->res > 0 && s->off + (uint32_t)cqe->res < s->len;
             if (rest && live) {
@@ -887,13 +1168,77 @@ take:;
         } else {
             c->tag = ud >> 2;
             c->res = cqe->res;
-            c->buf = cqe->flags & IORING_CQE_F_BUFFER ? (int32_t)(cqe->flags >> IORING_CQE_BUFFER_SHIFT) : -1;
+            c->buf = cqe->flags & IORING_CQE_F_BUFFER
+                         ? (int32_t)((uint32_t)ri * u->nbufs + (cqe->flags >> IORING_CQE_BUFFER_SHIFT)) : -1;
             c->more = (cqe->flags & IORING_CQE_F_MORE) != 0;
             c->send = 0;
         }
         n++;
     }
-    io_uring_cq_advance(&u->ring, seen);
+    io_uring_cq_advance(&r->ring, seen);
+    return n;
+}
+
+/* Submits what's queued, waits up to timeout_ms (-1: no limit) for at least
+   one completion, and writes up to out.len of them into out. Leaves any
+   others for the next call. With batch_us above 0, a wait that may block
+   first waits for out.len completions, up to batch_us and never past
+   timeout_ms, and only with none by then for the first as before: one wake
+   for many completions under load, two enters when idle. Linux 6.12's
+   min_wait does it in one, but the kernels this serves include 6.8.
+   Extra rings submit first and collect without waiting: one with
+   completions already keeps ring 0 from blocking, and one that gets work
+   while ring 0 blocks wakes it through their eventfd. */
+int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch_us) {
+    if (UR_EMULATED(h)) return urp_wait(UR_POLL(h), out, timeout_ms, batch_us);
+    struct ur *u = (struct ur *)(intptr_t)h;
+    int busy = u->nsent > 0;
+    for (int32_t i = 0; i < u->nrs; i++) {
+        struct ur_ring *x = &u->rs[i];
+        if (x->given) {
+            io_uring_buf_ring_advance(x->br, x->given);
+            x->given = 0;
+        }
+        if (i == 0) continue;
+        int e = io_uring_submit_and_get_events(&x->ring);
+        if (e < 0 && e != -EINTR && e != -EBUSY && e != -EAGAIN) return e;
+        if (io_uring_cq_ready(&x->ring) > 0) busy = 1;
+    }
+    struct io_uring *ring = &u->rs[0].ring;
+    struct io_uring_cqe *cqe;
+    int r;
+    long long left_us = timeout_ms < 0 ? -1 : (long long)timeout_ms * 1000;
+    if (!busy && batch_us > 0 && left_us != 0) {
+        long long us = left_us > 0 && left_us < batch_us ? left_us : batch_us;
+        struct __kernel_timespec ts = { us / 1000000, (us % 1000000) * 1000 };
+        r = io_uring_submit_and_wait_timeout(ring, &cqe, (unsigned)out.len, &ts, NULL);
+        if (r < 0 && r != -ETIME) return r;
+        if (io_uring_cq_ready(ring) > 0) goto take;
+        if (left_us > 0) {
+            left_us -= us;
+            timeout_ms = (int32_t)((left_us + 999) / 1000);
+            if (left_us == 0) goto take;
+        }
+    }
+    if (busy) {
+        r = io_uring_submit_and_get_events(ring);
+    } else if (timeout_ms < 0) {
+        r = io_uring_submit_and_wait(ring, 1);
+    } else {
+        struct __kernel_timespec ts = { timeout_ms / 1000, (long long)(timeout_ms % 1000) * 1000000 };
+        r = io_uring_submit_and_wait_timeout(ring, &cqe, 1, &ts, NULL);
+    }
+    if (r < 0 && r != -ETIME) return r;
+take:;
+    int32_t n = u->nsent < out.len ? u->nsent : (int32_t)out.len;
+    memcpy(out.data, u->sent, (size_t)n * sizeof *u->sent);
+    u->nsent -= n;
+    memmove(u->sent, u->sent + n, (size_t)u->nsent * sizeof *u->sent);
+    n = ur_reap(u, 0, out, n);
+    for (int32_t i = 1; i < u->nrs; i++) {
+        if (!busy) io_uring_get_events(&u->rs[i].ring);
+        n = ur_reap(u, i, out, n);
+    }
     return n;
 }
 
@@ -909,8 +1254,19 @@ void ur_destroy(int64_t h) {
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
-    io_uring_free_buf_ring(&u->ring, u->br, u->nbufs, 0);
-    io_uring_queue_exit(&u->ring);
+    for (int32_t i = 0; i < u->nrs; i++) {
+        io_uring_free_buf_ring(&u->rs[i].ring, u->rs[i].br, u->nbufs, 0);
+        io_uring_queue_exit(&u->rs[i].ring);
+        free(u->rs[i].bufs);
+        free(u->rs[i].peers);
+    }
+    if (u->xfd >= 0) close(u->xfd);
+    for (int32_t i = 0; i < u->nls; i++) free(u->ls[i]);
+    free(u->ls);
+    if (ur_direct == u) {
+        ur_direct = NULL;
+        net_direct_ring(NULL, NULL, NULL);
+    }
     for (uint32_t fd = 0; fd < u->nfds; fd++) {
         if (!u->fds[fd].head) continue;
         if (u->fds[fd].head->file >= 0) {
@@ -943,7 +1299,6 @@ void ur_destroy(int64_t h) {
         u->big = s->next;
         free(s);
     }
-    free(u->bufs);
     free(u->fds);
     free(u->sent);
     free(u->arms);

@@ -111,7 +111,8 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         lfds.push(fd);
     }
     let r = ring_create(cfg.ring_entries, cfg.ring_buffers, cfg.ring_buffer_size,
-                        if cfg.emulate_ring { RING_EMULATE } else if cfg.require_ring { RING_REQUIRE } else { 0 });
+                        (if cfg.emulate_ring { RING_EMULATE } else if cfg.require_ring { RING_REQUIRE } else { 0 })
+                        | (if cfg.ring_direct { RING_DIRECT } else { 0 }));
     guard r >= 0 else {
         close_listeners();
         return Error { call: "io_uring", code: -r };

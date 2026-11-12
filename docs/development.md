@@ -118,7 +118,8 @@ port + 363 (`H2_PORT`, 8443 beside 8080).
    loads the package's library: a test's extern needs a sidecar of its own, or that
    library needs the extern's C (v0.5.14).
 3. For each loop, `scripts/build.sh` and then `scripts/test-http.sh`: uring and epoll on
-   Linux and macOS, with `LOOP=uring-epoll` against the uring build on Linux too, and
+   Linux and macOS, with `LOOP=uring-epoll` and `LOOP=uring-direct` (direct
+   descriptors) against the uring build on Linux too, and
    iocp on Windows. The uring and epoll loops' build is the TLS build (`TLS=1`), run
    with `LOOP` set to the loop, whose TLS listener the tests take too. After the epoll
    build's, `scripts/test-h2spec.sh`, which fetches
