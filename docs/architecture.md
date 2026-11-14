@@ -131,7 +131,9 @@ and multishot receive fills provided buffers. The ring owns the memory the kerne
 touches after a call returns: the shim copies sends into its own reused buffers, and
 the loop copies receives out of provided buffers. A send of at least 64 KB with
 nothing queued on its socket first tries a synchronous `send(2)`, so only unsent bytes
-need a copy.
+need a copy. A receive that finds no provided buffer free waits in a queue, and the
+loop queues it again, oldest first, only while its ring will have a buffer for it
+([decisions](decisions.md#a-receive-that-found-no-buffer-waits-for-one)).
 
 A wait wakes for the first completion. With `Config.ring_batch_us`, a wait that would
 block holds for up to a pass's 256 completions, at most that long and never past the
@@ -141,7 +143,7 @@ next timer, so a busy worker wakes once for many
 With `Config.ring_direct`, connections are direct descriptors: slots in the ring's file
 table, outside the process's descriptor table, so a worker holds more connections than
 `RLIMIT_NOFILE`. When a table is full, the worker adds a ring, up to 16, which ring 0's
-wait collects. Accepts are single-shot, so each slot keeps its peer's address for
+wait collects, starting at the next ring each time. Accepts are single-shot, so each slot keeps its peer's address for
 `http::peer`, and a connection's fd in `Reply.fd` isn't one for system calls. A
 connection's close waits for its shutdown in flight, which finds its slot only when it
 runs ([decisions](decisions.md#direct-descriptors-and-rings-past-the-first-behind-configring_direct)).

@@ -169,6 +169,11 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
     var stop_by: i64 = 0;
     reusable[] var spill: u8[>..] = [];
     reusable var conns: RingConn<S>[>..] = [];
+    // The tags of connections whose receive ended and waits to be queued
+    // again (rearm), oldest from parked_at. One may have closed, or be
+    // reading again, since.
+    var parked: u64[>..] = [];
+    var parked_at = 0;
     var open = 0;
     // The generation of each connection, in its tag.
     var generation: u64 = 0;
@@ -599,11 +604,28 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
         } else if cq.res == 0 || (cq.res != -ENOBUFS && cq.res != -ECANCELED) {
             return false;   // the client closed or reset
         }
-        if !c.reading && !c.stalled {
-            ring_recv(r, c.fd, c.tag);
-            c.reading = true;
-        }
+        if !c.reading && !c.stalled { parked.push(c.tag); }
         return true;
+    }
+
+    // Queues the parked connections' receives again, oldest first, while
+    // their rings have a provided buffer free for each. Queued again at once
+    // after ENOBUFS, a receive fails again at once while more connections
+    // have bytes than the ring has buffers, and the failures fill each pass.
+    fn rearm() {
+        while parked_at < parked.len {
+            let tag = parked[parked_at];
+            let i = (tag & 0xFFFFFFFF) as i64;
+            if i < conns.len && conns[i].tag == tag && !conns[i].reading && !conns[i].stalled {
+                if !ring_recv_spare(r, conns[i].fd, tag) { break; }
+                conns[i].reading = true;
+            }
+            parked_at++;
+        }
+        if parked_at > 0 && parked_at * 2 >= parked.len {
+            drop_first(parked, parked_at);
+            parked_at = 0;
+        }
     }
 
     // A send's completion. False when the connection is done.
@@ -790,6 +812,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
                 sweep();
                 next_sweep = now + 1000;
             }
+            rearm();
             for k in lfds.len {
                 if !accepting[k] && !stopping && open < cfg.max_conns && (!accept_failed[k] || closed || tick) {
                     ring_accept(r, lfds[k], ring_listener_tag(k));

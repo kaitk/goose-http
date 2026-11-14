@@ -1399,6 +1399,40 @@ free descriptor, the one thing a full table lacks; one process per 64,000
 connections, the cache cost above; and registering accepted plain descriptors into
 the table, which still needs a free descriptor per accept.
 
+A wait reaps its rings starting at the next one each call, so that one ring whose
+completions fill a pass doesn't keep the others' waiting (2026-11-14).
+
+## A receive that found no buffer waits for one
+
+Decided 2026-11-14, for Plod's $12 Server Challenge entry (Plod's task 063).
+
+A multishot receive that ends with `ENOBUFS` isn't queued again in the same pass. The
+loop keeps its connection's tag in a queue, and at the end of each pass queues those
+connections' receives again, oldest first, through `ring_recv_spare`, which queues one
+only while the connection's ring will have a provided buffer free for it at the next
+wait, beside one for each receive it queued so since the last. On io_uring that is the
+larger of the buffers given back since the last wait and `ring_buffers` less the
+completions not yet reaped, since the loop gives each buffer back in the pass that
+reaps it and the kernel, with `IORING_SETUP_DEFER_TASKRUN`, fills none between waits.
+The emulated ring and IOCP count their free buffers. A receive that ends otherwise,
+as after a cancel, takes the same queue. One queued again after a stall or a wait
+still goes at once: each comes from its own connection's event, once.
+
+A connection in the queue has no receive queued, so a close, the sweep's timeouts,
+and a stop treat it as any connection that isn't reading, and its entry is dropped
+once its tag no longer matches.
+
+Why: with more connections sending in one pass than a ring has buffers, each receive
+queued again at once failed again at once, and the failures filled each pass of 256
+completions. 400 connections each sending a request at once, 50 rounds, 4 buffers,
+one worker (WSL2, Linux 6.18): 11.2 to 13.8 `ENOBUFS` completions a request and 12 to
+16 completions in all before, against 0.86 to 0.92 and 2.9 after, plain and with
+direct descriptors.
+
+Rejected: parking in the shim, which a receive's completion can't do, as it gives the
+tag but not the socket; and a fixed number of receives a pass, which still fails
+those beyond the buffers free.
+
 ## Not yet decided
 
 ### Compression in an optional module

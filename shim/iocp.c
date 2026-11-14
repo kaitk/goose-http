@@ -166,6 +166,7 @@ struct ur {
     uint32_t nbufs, buflen;
     int32_t *free;             /* the ids of free buffers, a stack */
     uint32_t nfree;
+    uint32_t spared;           /* receives ur_recv_spare posted since the last ur_wait */
     struct ur_send *spare[UR_CLASSES];
     struct ur_send *big;
     uint32_t kept;             /* the bytes of big's records */
@@ -469,6 +470,16 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
     k->reading = 1;
     k->cancel = 0;
     ur_post_recv(u, k);
+}
+
+/* ur_recv, while a buffer is free for each receive this posted since the
+   last ur_wait; returns whether it posted this one. */
+uint8_t ur_recv_spare(int64_t h, int32_t fd, uint64_t tag) {
+    struct ur *u = (struct ur *)(intptr_t)h;
+    if (u->spared >= u->nfree) return 0;
+    u->spared++;
+    ur_recv(h, fd, tag);
+    return 1;
 }
 
 /* Appends s to sock's sends, and posts it if it's first. */
@@ -893,6 +904,7 @@ int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch
     (void)batch_us;
     struct ur *u = (struct ur *)(intptr_t)h;
     if (u->err) return u->err;
+    u->spared = 0;
     int32_t n = 0;
     while (n < out.len && u->ready) {
         struct ur_req *q = u->ready;

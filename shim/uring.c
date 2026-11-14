@@ -195,6 +195,7 @@ struct ur_ring {
     struct io_uring_buf_ring *br;
     unsigned char *bufs;
     int given;              /* buffers given back since the last ur_wait */
+    int spared;             /* receives ur_recv_spare queued since the last ur_wait */
     uint32_t open;          /* direct: slots in use, or an accept's to fill */
     struct ur_peer *peers;  /* direct: each slot's */
 };
@@ -219,6 +220,7 @@ struct ur_listen {
 struct ur {
     struct ur_ring rs[UR_RINGS];
     int32_t nrs;
+    uint32_t reaps;         /* ur_wait's calls, which pick the ring it reaps first */
     uint32_t nbufs, buflen;
     /* Direct descriptors: each table's slots, the ring accepts go to, the
        listeners, and the eventfd the extra rings signal, or -1. */
@@ -272,6 +274,7 @@ static int32_t ur_direct_shutdown(int32_t fd, int32_t how);
 int64_t urp_create(int32_t entries, int32_t nbufs, int32_t buflen, int32_t flags);
 void urp_accept(int64_t h, int32_t fd, uint64_t tag);
 void urp_recv(int64_t h, int32_t fd, uint64_t tag);
+uint8_t urp_recv_spare(int64_t h, int32_t fd, uint64_t tag);
 int32_t urp_send(int64_t h, int32_t fd, uint64_t tag, ur_bytes data);
 int32_t urp_send_file(int64_t h, int32_t fd, uint64_t tag, int64_t file, int64_t off, int64_t len);
 int32_t urp_send_shared(int64_t h, int32_t fd, uint64_t tag, ur_bytes data);
@@ -525,6 +528,23 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
     sqe->flags |= IOSQE_BUFFER_SELECT;
     sqe->buf_group = 0;
     io_uring_sqe_set_data64(sqe, tag << 2 | UR_TAGGED);
+}
+
+/* ur_recv, if fd's ring will have a provided buffer free for this receive at
+   the next ur_wait, beside one for each receive this queued since the last;
+   returns whether it queued it. Free then are at least the buffers given back
+   since the last ur_wait, and at least all but one for each completion not
+   yet reaped: the loop gives each buffer back in the pass that reaps it, and
+   with IORING_SETUP_DEFER_TASKRUN the kernel fills none between waits. */
+uint8_t ur_recv_spare(int64_t h, int32_t fd, uint64_t tag) {
+    if (UR_EMULATED(h)) return urp_recv_spare(UR_POLL(h), fd, tag);
+    struct ur *u = (struct ur *)(intptr_t)h;
+    struct ur_ring *r = ur_ring_of(u, fd);
+    int rest = (int)u->nbufs - (int)io_uring_cq_ready(&r->ring);
+    if (r->spared >= (r->given > rest ? r->given : rest)) return 0;
+    r->spared++;
+    ur_recv(h, fd, tag);
+    return 1;
 }
 
 /* Queues s's next step: for data, a send of the rest; for a file, a splice
@@ -1234,6 +1254,7 @@ int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch
             io_uring_buf_ring_advance(x->br, x->given);
             x->given = 0;
         }
+        x->spared = 0;
         if (i == 0) continue;
         int e = io_uring_submit_and_get_events(&x->ring);
         if (e < 0 && e != -EINTR && e != -EBUSY && e != -EAGAIN) return e;
@@ -1269,9 +1290,12 @@ take:;
     memcpy(out.data, u->sent, (size_t)n * sizeof *u->sent);
     u->nsent -= n;
     memmove(u->sent, u->sent + n, (size_t)u->nsent * sizeof *u->sent);
-    n = ur_reap(u, 0, out, n);
-    for (int32_t i = 1; i < u->nrs; i++) {
-        if (!busy) io_uring_get_events(&u->rs[i].ring);
+    /* Each call starts at the next ring, so that one whose completions fill
+       out doesn't keep the others' waiting. */
+    int32_t first = (int32_t)(u->reaps++ % (uint32_t)u->nrs);
+    for (int32_t k = 0; k < u->nrs; k++) {
+        int32_t i = (first + k) % u->nrs;
+        if (i > 0 && !busy) io_uring_get_events(&u->rs[i].ring);
         n = ur_reap(u, i, out, n);
     }
     return n;
