@@ -61,7 +61,7 @@ middleware (see [Plod](https://github.com/kaitk/plod)).
 
 ## Quick start
 
-Install Goose [`v2026.3`](https://github.com/aardappel/goose/releases/tag/v2026.3): unpack
+Install Goose [`v2026.4`](https://github.com/aardappel/goose/releases/tag/v2026.4): unpack
 the archive for your platform and put its directory on `PATH`
 ([Goose's install notes](https://github.com/aardappel/goose#install-a-release)). Building
 a program also needs a C compiler and, on Linux, liburing:

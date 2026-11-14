@@ -1,5 +1,5 @@
 {
-    "goose.compilerPath": "build/goose-v2026.3-windows-x64/goose.exe",
-    "goose.stdlibPath": "build/goose-v2026.3-windows-x64/stdlib",
+    "goose.compilerPath": "build/goose-v2026.4-windows-x64/goose.exe",
+    "goose.stdlibPath": "build/goose-v2026.4-windows-x64/stdlib",
     "goose.entryFile": "server/server.goose"
 }

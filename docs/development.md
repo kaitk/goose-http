@@ -39,15 +39,15 @@ What isn't Goose, and why, is in
 
 ## Get Goose
 
-The scripts use the official Goose release that `scripts/goose.sh` pins: `v2026.3`
-(`8511ae3`), since 2026-10-21. It has every fix the commit pinned before it was built for:
+The scripts use the official Goose release that `scripts/goose.sh` pins: `v2026.4`
+(`6c1fbc7`), since 2026-11-14. It has every fix this repository has waited for:
 [aardappel/goose#37](https://github.com/aardappel/goose/pull/37), which `http::run` and
 `http::lane_open` need, [#41](https://github.com/aardappel/goose/pull/41), gcc's
 `ByteSet` miscompile, and [#42](https://github.com/aardappel/goose/pull/42), TinyCC on
 lib64 systems. The first script that needs the compiler downloads the release's
 archive for the platform from
 [the releases page](https://github.com/aardappel/goose/releases), checks its SHA-256,
-and unpacks it into `build/goose-v2026.3-<platform>/`; later runs reuse it. To fetch the
+and unpacks it into `build/goose-v2026.4-<platform>/`; later runs reuse it. To fetch the
 compiler and print its path:
 
 ```sh
@@ -329,8 +329,8 @@ The Windows compiler typechecks the whole program without running it. With the r
 fetched (`scripts/goose.sh` in Git Bash):
 
 ```powershell
-build\goose-v2026.3-windows-x64\goose.exe --check server\server.goose
-build\goose-v2026.3-windows-x64\goose.exe --check test\http\parse.goose
+build\goose-v2026.4-windows-x64\goose.exe --check server\server.goose
+build\goose-v2026.4-windows-x64\goose.exe --check test\http\parse.goose
 ```
 
 `--check` and `-o out.c` don't compile the generated C, so the Linux-only C in `shim/` is
@@ -341,7 +341,7 @@ through TinyCC, which can't run the server ([above](#build-and-test)). Install i
 the release:
 
 ```powershell
-code --install-extension build\goose-v2026.3-windows-x64\vscode\goose-language.vsix
+code --install-extension build\goose-v2026.4-windows-x64\vscode\goose-language.vsix
 ```
 
 It needs VS Code 1.85 or later. If `code` on PATH belongs to an older install, call the
