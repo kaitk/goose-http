@@ -125,7 +125,8 @@ struct Config {
     grace_ms: i64 = 10000,
     // serve's ring: its submission entries, and its provided buffers, which
     // the kernel fills in turn, a power of two of them. A receive that finds
-    // none left ends its multishot request, which the loop queues again. The
+    // none left ends its multishot request, which the loop queues again,
+    // oldest first, once its ring will have a buffer free for it. The
     // loop gives each buffer back in the pass that takes it. io_uring takes
     // the buffers in ring order, so a worker commits every one of them
     // whatever its load; 64 served as fast as 256 and 1,024 (tasks 005 and

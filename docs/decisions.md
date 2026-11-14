@@ -1442,6 +1442,11 @@ WSL2, Linux 6.18): 10,864 to 10,990 req/s, slowest 1.5 to 2.4 s, and 34.2 to 34.
 request with receives queued again at once; 11,567 to 11,687, 4.0 to 5.7 s, and 32.2 to
 32.5 counting its own; 11,669 to 11,728, 1.40 s, and 32.1 to 32.2 counting all.
 
+Below capacity it costs nothing measurable: against `v0.5.19` at the default 64
+buffers, `bench/run.sh`'s ten cells, Plod's HttpArena profiles, 36 runs each of
+`async`'s 32,000 connections, and IOCP under `bench/oha.sh` stayed within their runs'
+spread (2026-11-14, [results](results.md#2026-11-14-the-re-arm-against-v0519-below-capacity)).
+
 Rejected: parking in the shim, which a receive's completion can't do, as it gives the
 tag but not the socket; and a fixed number of receives a pass, which still fails
 those beyond the buffers free.

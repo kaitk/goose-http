@@ -17,6 +17,61 @@ WSL2 loopback runs through a VM; its kernel cost differs from bare metal. Runs t
 2026-10-12 use kernel 6.18.40.1-microsoft-standard-WSL2. The 2026-10-14 runs use
 6.18.54.1-microsoft-standard-WSL2. Each run's `env.txt` records the environment.
 
+## 2026-11-14: the re-arm against v0.5.19, below capacity
+
+Whether queueing a receive that found no buffer only once its ring has one
+([decision](decisions.md#a-receive-that-found-no-buffer-waits-for-one)) costs anything
+where the buffers rarely run out. `bc41591` against `75ac94f` (`v0.5.19`), both at the
+default 64 `ring_buffers`, Goose `v2026.3`, on the desktop described above, kernel
+6.18.58.1-microsoft-standard-WSL2. Level everywhere: no profile moved beyond its runs'
+spread.
+
+`bench/run.sh`, `SERVERS="goose-main-uring goose-rearm-uring" RUNS=3 DURATION=10
+WARMUP=3`, the two builds in each round, rows from `runs.tsv`; CPU is the server's over
+the wrk run:
+
+| Workers | Test | Conns | main req/s | rearm req/s | main µs a request | rearm µs a request |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | plaintext | 256 | 1.74–1.84 M | 1.78–1.79 M | 0.54–0.57 | 0.56 |
+| 1 | plaintext | 1,024 | 1.49–1.68 M | 1.54–1.65 M | 0.59–0.67 | 0.60–0.65 |
+| 1 | plaintext | 4,096 | 1.47–1.50 M | 1.47–1.48 M | 0.65–0.67 | 0.66–0.67 |
+| 1 | JSON | 256 | 139–143 K | 140–143 K | 6.98–7.18 | 6.96–7.14 |
+| 1 | JSON | 1,024 | 99–113 K | 98–122 K | 8.75–10.01 | 8.16–10.15 |
+| 4 | plaintext | 256 | 5.79–5.91 M | 5.75–5.80 M | 0.68–0.69 | 0.69 |
+| 4 | plaintext | 1,024 | 5.65–5.69 M | 5.67–5.89 M | 0.70–0.71 | 0.70–0.71 |
+| 4 | plaintext | 4,096 | 5.30–5.37 M | 5.25–5.42 M | 0.74 | 0.73–0.74 |
+| 4 | JSON | 256 | 419–425 K | 425–426 K | 9.38–9.51 | 9.34–9.38 |
+| 4 | JSON | 1,024 | 413–418 K | 410–419 K | 9.52–9.63 | 9.51–9.70 |
+
+h2load's median p99 was within 0.5 ms in each cell but two on one worker, both lower
+with `bc41591`: 4,096 plaintext connections, 45.7 ms against 47.3, and 1,024 JSON
+connections, 9.0 ms against 10.1. Neither build had an error.
+
+Plod's HttpArena run (Plod's `bench/httparena.sh`, HttpArena `d9438f6`, Plod
+`4cf3780`), its entry on `v0.5.19` against the same entry declaring goose-http at
+`bc41591`, server CPUs 0-3, load CPUs 4-15, 3 rounds of every profile with the order
+swapped each round, then 9 more of `async`. Means over every run where the table says
+so, else the range of the harness's best of three:
+
+| Profile | Runs each | main req/s | rearm req/s | main µs a request | rearm µs a request |
+|---|---:|---:|---:|---:|---:|
+| baseline, 4,096 conns, mean | 9 | 545 K | 543 K | 5.01 | 4.99 |
+| limited-conn, mean | 9 | 306 K | 307 K | 7.24 | 7.23 |
+| pipelined, best | 3 | 5.44–5.50 M | 5.47–5.49 M | 0.52–0.53 | 0.52–0.53 |
+| latency-1m, 200,000 offered, best | 3 | 199 K | 199 K | 10.50–11.58 | 10.58–11.39 |
+| latency-10k, best | 3 | 10 K | 10 K | 33.32–34.01 | 30.72–33.80 |
+| async, 32,000 conns, mean | 36 | 265.8 K (sd 13.6) | 265.0 K (sd 15.3) | 11.49 | 11.44 |
+
+`async`, 8,000 connections a worker answered after the same 10 ms, is where most
+connections are ready at once. Its best of three favoured `v0.5.19` in five of the first
+six rounds and `bc41591` in four of the next six.
+
+IOCP, `bench/oha.sh` on Windows 11 in Git Bash, 2,000,000 requests over 256 connections,
+unpinned, user and kernel time a request: 1 worker, 3 runs each, 75.2–76.8 K and
+12.9–13.3 µs against 79.0–80.4 K and 12.4–12.6 µs; 4 workers, 6 runs each, half with
+`bc41591` first, means 210.4 K and 17.18 µs against 212.2 K and 17.27 µs. Four workers'
+runs land at about 190 K or about 240 K whichever build runs.
+
 ## 2026-10-25: v0.5.12, Goose builds only
 
 Plod's `bench/all.sh` measured this repository in session `2026-10-25T2003-Tiamat`:
