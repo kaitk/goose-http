@@ -1410,13 +1410,17 @@ A multishot receive that ends with `ENOBUFS` isn't queued again in the same pass
 loop keeps its connection's tag in a queue, and at the end of each pass queues those
 connections' receives again, oldest first, through `ring_recv_spare`, which queues one
 only while the connection's ring will have a provided buffer free for it at the next
-wait, beside one for each receive it queued so since the last. On io_uring that is the
+wait, beside one for each receive queued since the last by either call. On io_uring that is the
 larger of the buffers given back since the last wait and `ring_buffers` less the
 completions not yet reaped, since the loop gives each buffer back in the pass that
 reaps it and the kernel, with `IORING_SETUP_DEFER_TASKRUN`, fills none between waits.
 The emulated ring and IOCP count their free buffers. A receive that ends otherwise,
-as after a cancel, takes the same queue. One queued again after a stall or a wait
-still goes at once: each comes from its own connection's event, once.
+as after a cancel, takes the same queue. A new connection's first receive, and one
+queued again after a stall or a wait, still go at once: each comes from its own
+connection's event, once. They count against the buffers free, so a receive queued
+from the queue finds its buffer: the kernel issues the receives queued at a wait
+before receives already armed take buffers. One that failed again would go to the
+queue's end, behind every connection that found no buffer since.
 
 A connection in the queue has no receive queued, so a close, the sweep's timeouts,
 and a stop treat it as any connection that isn't reading, and its entry is dropped
@@ -1428,6 +1432,15 @@ completions. 400 connections each sending a request at once, 50 rounds, 4 buffer
 one worker (WSL2, Linux 6.18): 11.2 to 13.8 `ENOBUFS` completions a request and 12 to
 16 completions in all before, against 0.86 to 0.92 and 2.9 after, plain and with
 direct descriptors.
+
+Counting only its own receives, `ring_recv_spare` let new connections' first receives,
+queued earlier in the pass, take the buffers it had counted on: while 20,000 users
+connected, about 1,000 a second of the receives it queued failed again and went to the
+queue's end, and the slowest request waited 4.0 to 5.7 s. Plod's $12 entry, 64 buffers,
+k6 at 20,000 users against a server held to 0.4 CPU, four runs, four, and two (Ryzen 7 5800X3D,
+WSL2, Linux 6.18): 10,864 to 10,990 req/s, slowest 1.5 to 2.4 s, and 34.2 to 34.7 µs a
+request with receives queued again at once; 11,567 to 11,687, 4.0 to 5.7 s, and 32.2 to
+32.5 counting its own; 11,669 to 11,728, 1.40 s, and 32.1 to 32.2 counting all.
 
 Rejected: parking in the shim, which a receive's completion can't do, as it gives the
 tag but not the socket; and a fixed number of receives a pass, which still fails

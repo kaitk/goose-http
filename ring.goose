@@ -46,8 +46,8 @@ extern "ur_listeners" fn ring_listeners() -> i32;
 extern "ur_accept" fn ring_accept(r: i64, fd: i32, tag: u64);
 extern "ur_recv" fn ring_recv(r: i64, fd: i32, tag: u64);
 // ring_recv, if fd's ring will have a provided buffer free for this receive
-// at the next wait, beside one for each it queued since the last; returns
-// whether it queued it. The count assumes every buffer the last wait gave
+// at the next wait, beside one for each receive queued since the last, by
+// either call; returns whether it queued it. The count assumes every buffer the last wait gave
 // out is given back before the call.
 extern "ur_recv_spare" fn ring_recv_spare(r: i64, fd: i32, tag: u64) -> bool;
 // A send goes out after those queued before it on fd, one at a time.

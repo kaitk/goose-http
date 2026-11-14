@@ -195,7 +195,7 @@ struct ur_ring {
     struct io_uring_buf_ring *br;
     unsigned char *bufs;
     int given;              /* buffers given back since the last ur_wait */
-    int spared;             /* receives ur_recv_spare queued since the last ur_wait */
+    int recvs;              /* receives queued since the last ur_wait */
     uint32_t open;          /* direct: slots in use, or an accept's to fill */
     struct ur_peer *peers;  /* direct: each slot's */
 };
@@ -522,7 +522,9 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
         return;
     }
     struct ur *u = (struct ur *)(intptr_t)h;
-    struct io_uring_sqe *sqe = ur_sqe_on(ur_ring_of(u, fd));
+    struct ur_ring *r = ur_ring_of(u, fd);
+    r->recvs++;
+    struct io_uring_sqe *sqe = ur_sqe_on(r);
     io_uring_prep_recv_multishot(sqe, fd, NULL, 0, 0);
     ur_target(sqe, fd);
     sqe->flags |= IOSQE_BUFFER_SELECT;
@@ -531,18 +533,19 @@ void ur_recv(int64_t h, int32_t fd, uint64_t tag) {
 }
 
 /* ur_recv, if fd's ring will have a provided buffer free for this receive at
-   the next ur_wait, beside one for each receive this queued since the last;
+   the next ur_wait, beside one for each receive queued since the last;
    returns whether it queued it. Free then are at least the buffers given back
    since the last ur_wait, and at least all but one for each completion not
    yet reaped: the loop gives each buffer back in the pass that reaps it, and
-   with IORING_SETUP_DEFER_TASKRUN the kernel fills none between waits. */
+   with IORING_SETUP_DEFER_TASKRUN the kernel fills none between waits. The
+   kernel issues the receives queued before others' armed ones take buffers,
+   so this one gets its buffer and keeps its place. */
 uint8_t ur_recv_spare(int64_t h, int32_t fd, uint64_t tag) {
     if (UR_EMULATED(h)) return urp_recv_spare(UR_POLL(h), fd, tag);
     struct ur *u = (struct ur *)(intptr_t)h;
     struct ur_ring *r = ur_ring_of(u, fd);
     int rest = (int)u->nbufs - (int)io_uring_cq_ready(&r->ring);
-    if (r->spared >= (r->given > rest ? r->given : rest)) return 0;
-    r->spared++;
+    if (r->recvs >= (r->given > rest ? r->given : rest)) return 0;
     ur_recv(h, fd, tag);
     return 1;
 }
@@ -1254,7 +1257,7 @@ int32_t ur_wait(int64_t h, ur_completions out, int32_t timeout_ms, int32_t batch
             io_uring_buf_ring_advance(x->br, x->given);
             x->given = 0;
         }
-        x->spared = 0;
+        x->recvs = 0;
         if (i == 0) continue;
         int e = io_uring_submit_and_get_events(&x->ring);
         if (e < 0 && e != -EINTR && e != -EBUSY && e != -EAGAIN) return e;

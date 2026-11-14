@@ -140,7 +140,7 @@ struct rp {
     uint32_t nbufs, buflen;
     int32_t *free;                  /* the ids of free buffers, a stack */
     uint32_t nfree;
-    uint32_t spared;                /* receives recv_spare queued since the last ur_wait */
+    uint32_t recvs;                 /* receives queued since the last ur_wait */
     struct rp_fd *fds;
     uint32_t nfds;
     int32_t *ready;                 /* fds with work for the next ur_wait */
@@ -353,15 +353,15 @@ void RP(recv)(int64_t h, int32_t fd, uint64_t tag) {
     f->tag = tag;
     f->reading = 1;
     f->readable = 1;
+    u->recvs++;
     rp_queue(u, fd);
 }
 
-/* recv, while a buffer is free for each receive this queued since the last
+/* recv, while a buffer is free for each receive queued since the last
    ur_wait; returns whether it queued this one. */
 uint8_t RP(recv_spare)(int64_t h, int32_t fd, uint64_t tag) {
     struct rp *u = (struct rp *)(intptr_t)h;
-    if (u->spared >= u->nfree) return 0;
-    u->spared++;
+    if (u->recvs >= u->nfree) return 0;
     RP(recv)(h, fd, tag);
     return 1;
 }
@@ -634,7 +634,7 @@ int32_t RP(wait)(int64_t h, rp_completions out, int32_t timeout_ms, int32_t batc
     (void)batch_us;
     struct rp *u = (struct rp *)(intptr_t)h;
     if (u->err) return u->err;
-    u->spared = 0;
+    u->recvs = 0;
     int32_t n = 0;
     while (n < out.len && u->headdone < u->ndone) out.data[n++] = u->done[u->headdone++];
     if (u->headdone == u->ndone) u->headdone = u->ndone = 0;
