@@ -2,6 +2,22 @@
 
 What each tag adds. Each release names the Goose compiler it was built and tested with.
 
+## v0.5.20 (2026-11-14)
+
+Receives that find no buffer wait for one. Goose `v2026.3`, goose-hash `v0.0.4`,
+goose-tls `v0.0.6`, and goose-compress `v0.1.4`. No breaking changes.
+
+Changed:
+
+- On io_uring, a receive that ends because its ring had no provided buffer free is
+  queued again at the end of the pass, oldest first, only while its ring will have a
+  buffer for it, where it was queued again at once and failed again while more
+  connections had data than `Config.ring_buffers`. Past capacity with 64 buffers, Plod's
+  $12 entry served 7% more requests a second at 6% less CPU a request; below capacity
+  it is level ([decision](docs/decisions.md#a-receive-that-found-no-buffer-waits-for-one)).
+- A wait over several rings, with `Config.ring_direct`, reaps them starting at the next
+  ring each call, so one ring's completions don't keep the others' waiting.
+
 ## v0.5.19 (2026-11-12)
 
 Fewer wakes and more connections a worker on io_uring, and a WebSocket client. Goose
